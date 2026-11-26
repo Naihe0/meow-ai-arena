@@ -168,12 +168,12 @@ bool readTurn() {
 }
 
 // Flood maximal horizontal runs. Unvisited cells after the flood are enclosed.
-void captureMask(int id, const Row *path, Row *result) {
+void captureFrom(const Row *base, const Row *path, Row *result) {
     struct Span { int y; Row run; };
     Span stack[M];
     Row open[HMAX];
     int top = 0;
-    for (int y=0; y<H; ++y) open[y] = boardMask & ~(land[id][y] | path[y]);
+    for (int y=0; y<H; ++y) open[y] = boardMask & ~(base[y] | path[y]);
     auto visit = [&](int y, Row seeds) {
         Row available = open[y];
         while (seeds & available) {
@@ -194,8 +194,10 @@ void captureMask(int id, const Row *path, Row *result) {
         if (y) visit(y-1,run);
         if (y+1<H) visit(y+1,run);
     }
-    for (int y=0; y<H; ++y) result[y] = (open[y] | path[y]) & ~land[id][y];
+    for (int y=0; y<H; ++y) result[y] = (open[y] | path[y]) & ~base[y];
 }
+
+void captureMask(int id,const Row *path,Row *result) {captureFrom(land[id],path,result);}
 
 void movementMap(int id) {
     auto &p = pl[id];
@@ -381,6 +383,7 @@ void trackRaces() {
     }
 }
 
+int rivalArrival[4][M];
 void assessOpponents() {
     const auto &us=pl[me];
     std::fill_n(threat,M,INF);
@@ -404,7 +407,7 @@ void assessOpponents() {
         if (rival<0 || pl[i].area>pl[rival].area) rival=i;
         auto &p=pl[i];
         p.minCut=INF; p.rawGain=p.ourLoss=0;
-        if (!forecasting && count==4) std::fill_n(directReturnClaim[i],H,Row(0));
+        if (!forecasting) std::fill_n(directReturnClaim[i],H,Row(0));
         if (p.length && p.home) {
             Row path[HMAX], gains[HMAX];
             std::copy_n(lines[i],H,path);
@@ -413,7 +416,7 @@ void assessOpponents() {
             captureMask(i,path,gains);
             for (int y=0; y<H; ++y) {
                 for (int j=0; j<count; ++j) if (j!=i) gains[y] &= ~fort[j][y];
-                if (!forecasting && count==4) directReturnClaim[i][y]=gains[y];
+                if (!forecasting) directReturnClaim[i][y]=gains[y];
                 p.rawGain += std::popcount(gains[y]);
                 p.ourLoss += std::popcount(gains[y] & land[me][y]);
             }
@@ -447,6 +450,7 @@ void assessOpponents() {
             int allowance=static_cast<int>(std::round(delay*clip((dist-2.f)/7.f,0.f,1.f)));
             int effective=std::min(dist+allowance, reset+taxi(spawn[i],k));
             threat[k]=std::min(threat[k],effective);
+            if (!forecasting && count==4) rivalArrival[i][k]=effective;
             if (!forecasting) {
                 int honest=(pressing[i]>=2 && thirdParty[i]>2) ? std::min(effective,dist) : effective;
                 escapeThreat[k]=std::min(escapeThreat[k],honest);
@@ -1135,6 +1139,46 @@ std::pair<float,float> scoreMask(const Row *mask) {
     return {entry.value,entry.strategy};
 }
 
+float duelClosingValue(const Row *mask,int spent,int approach,int eta) {
+    if (count!=2 || ticksLeft>64) return 0.f;
+    const auto &enemy=pl[rival];
+    const auto &forecast=future[rival];
+    float pending=float(enemy.rawGain+enemy.ourLoss);
+    if (forecast.deadline && forecast.deadline<=ticksLeft)
+        pending=std::max(pending,forecast.confidence*(forecast.amount+forecast.loss));
+    float swingRoom=7.f+1.55f*ticksLeft;
+    bool live=enemy.length>=3 && enemy.homeSteps<=ticksLeft && pending>=12.f;
+    bool close=std::min(std::abs(float(lead)),std::abs(lead-pending))<swingRoom;
+    if (!(live && std::abs(lead-0.55f*pending)<0.72f*swingRoom)) return 0.f;
+    int ours=0,directOverlap=0,plannedOverlap=0;
+    for (int y=0;y<H;++y) {
+        Row newLand=mask[y]&~fort[rival][y];
+        ours+=std::popcount(newLand)+std::popcount(newLand&land[rival][y]);
+        directOverlap+=std::popcount(newLand&directReturnClaim[rival][y]);
+        if (forecast.deadline)
+            plannedOverlap+=std::popcount(newLand&forecast.claims[y]);
+    }
+    float direct=0.f,planned=0.f;
+    if (enemy.length && enemy.homeSteps<=ticksLeft) {
+        float pressured=clip((enemy.homeSteps+5.f-cutDistance[me][rival])/9.f,0.f,1.f);
+        direct=0.25f+0.53f*pressured;
+    }
+    if (forecast.deadline && forecast.deadline<=ticksLeft) planned=(1.f-direct)*forecast.confidence;
+    int remaining=ticksLeft-spent;
+    float uncertainty=3.0f+0.75f*remaining;
+    auto value=[&](float margin){return margin/(uncertainty+std::abs(margin));};
+    float safety=riskTable[std::clamp(spent-approach+std::min(7,(approach+1)/2)+1-eta,0,159)];
+    auto expected=[&](int taken,int overlap,int bankAt) {
+        float idle=float(lead-taken);
+        int ordering=(bankAt<spent)-(bankAt>spent);
+        return safety*(value(idle+ours+ordering*overlap)-value(idle));
+    };
+    float improved=(1.f-direct-planned)*expected(0,0,0);
+    if (direct) improved+=direct*expected(enemy.rawGain+enemy.ourLoss,directOverlap,enemy.homeSteps);
+    if (planned) improved+=planned*expected(forecast.amount+forecast.loss,plannedOverlap,forecast.deadline);
+    return 9.0f*improved*clip((64+8.f-ticksLeft)/64,0.f,1.f);
+}
+
 float finalStanding(const Row *mask,int spent,int approach,int eta) {
     int gained=0, taken[4]{};
     for (int y=0; y<H; ++y) {
@@ -1158,6 +1202,35 @@ float finalStanding(const Row *mask,int spent,int approach,int eta) {
                -(chance(gap+std::max(0,ticksLeft-4)*0.94f)-chance(gap));
     }
     return (count==2 ? 5.3f : 4.1f)*change;
+}
+
+// Compare attacks on a trail in two time windows. A rival cut on tick c
+// still acts on that tick. Its next move starts at its spawn.
+int arrivalAfterCuts(const vector<int> &route,int duration,int approach,const int *kills,int originalEta) {
+    int confirmed[4]{};
+    bool any=false;
+    for (int i=0;i<count;++i) if (kills[i] && kills[i]<=pl[i].homeSteps && thirdParty[i]>=kills[i]) {
+        confirmed[i]=kills[i];any=true;
+    }
+    if (!any) return originalEta;
+    int result=INF;
+    auto visit=[&](int k,int birth) {
+        for (int i=0;i<count;++i) if (i!=me && pl[i].active) {
+            int c=confirmed[i],arrival=rivalArrival[i][k];
+            if (!c) {result=std::min(result,arrival);continue;}
+            int before=std::max(birth+1,arrival);
+            if (before<=c) result=std::min(result,before+duration-c);
+            result=std::min(result,c+afterRespawn(i,k));
+        }
+    };
+    for (int k:pl[me].trace) visit(k,0);
+    for (int j=approach;j+1<duration;++j) visit(route[j],j+1);
+    // Uncertain second cuts still deserve the original respawn penalty.
+    for (int i=0;i<count;++i) if (kills[i] && !confirmed[i]) {
+        for (int k:pl[me].trace) result=std::min(result,kills[i]+afterRespawn(i,k));
+        for (int j=approach;j+1<duration;++j) result=std::min(result,kills[i]+afterRespawn(i,route[j]));
+    }
+    return result;
 }
 
 void evaluate(vector<int> moves,float bias,Choice &best) {
@@ -1194,6 +1267,8 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
                     eta=std::min(eta,arrived);
                 }
             }
+            if (count==4 && seenOpp && !forecasting)
+                eta=arrivalAfterCuts(moves,t,approach,killTime,eta);
             captureMask(me,path,gainMask);
             auto [gain,strategic]=scoreMask(gainMask);
             float score=courseScore(gain+strategic,approach,t-approach,eta,k);
@@ -1222,6 +1297,7 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
                     float urgency=0.76f*clip((82.f-ticksLeft+15.f)/82.f,0.f,1.f);
                     score+=urgency*(total-score);
                 }
+                if (count==2 && ticksLeft<=64) score+=duelClosingValue(gainMask,t,approach,eta);
                 if (ticksLeft<=52) {
                     float frac=float(t)/ticksLeft;
                     score*=1.f+0.32f*frac*frac;
@@ -1595,6 +1671,122 @@ Choice lookAhead(Choice initial,vector<Choice> &alternatives) {
     base.restore();
     assessOpponents(); homeMaps(); boardValues(); prepareScore();
     return initial;
+}
+
+// Follow both visible plans through their first bank. Remove cut trails before
+// applying any bank, matching the simultaneous-move game.
+struct ClosingRoute {
+    vector<int> cells;
+    int swing=0;
+    float weight=0;
+};
+ClosingRoute closingOptions[2];
+
+void prepareClosingRoutes() {
+    if (count!=2) return;
+    for (auto &r:closingOptions) {r.cells.clear();r.weight=0;}
+    const auto &p=pl[rival]; const auto &f=future[rival];
+    if (ticksLeft>68 || !p.active) return;
+    if (p.length && p.home && p.homeSteps<=ticksLeft) {
+        auto &r=closingOptions[0];
+        for (int k=p.home;k!=p.pos;k=p.parent[k]) r.cells.push_back(k);
+        std::reverse(r.cells.begin(),r.cells.end());r.swing=p.rawGain+p.ourLoss;
+        r.weight=0.24f+0.57f*clip((p.homeSteps+7.f-cutDistance[me][rival])/10.f,0.f,1.f);
+    }
+    if (f.deadline && f.deadline<=ticksLeft) {
+        auto &r=closingOptions[1];
+        r.cells.assign(f.moves.begin(),f.moves.begin()+f.deadline);
+        r.swing=f.amount+f.loss;
+        r.weight=(1.f-closingOptions[0].weight)*f.confidence;
+    }
+}
+
+int coupledMargin(const vector<int>& ours,const vector<int>& theirs) {
+    int id[2]={me,rival},head[2]={pl[me].pos,pl[rival].pos};
+    bool open[2]={bool(pl[me].length),bool(pl[rival].length)},finished[2]={};
+    Row territory[2][HMAX],ink[2][HMAX];
+    const vector<int>* route[2]={&ours,&theirs};
+    for (int s=0;s<2;++s) {
+        std::copy_n(land[id[s]],H,territory[s]);std::copy_n(lines[id[s]],H,ink[s]);
+    }
+    auto has=[](const Row *rows,int k){return bool(rows[yof[k]]&(Row(1)<<xof[k]));};
+    for (int t=0;t<int(std::max(ours.size(),theirs.size()));++t) {
+        bool move[2],dead[2]={},bank[2]={};int dest[2];
+        for (int s=0;s<2;++s) {
+            move[s]=!finished[s] && t<int(route[s]->size());
+            dest[s]=move[s]?(*route[s])[t]:head[s];
+        }
+        if (!move[0] && !move[1]) break;
+        bool contact=move[0]&&move[1]&&(dest[0]==dest[1]||(dest[0]==head[1]&&dest[1]==head[0]));
+        for (int s=0;s<2;++s) {
+            dead[s]=contact || (move[s]&&has(ink[s],dest[s])) ||
+                    (move[1-s]&&has(ink[s],dest[1-s]));
+            bank[s]=move[s]&&!dead[s]&&open[s]&&has(territory[s],dest[s]);
+        }
+        for (int s=0;s<2;++s) {
+            if (dead[s]) {std::fill_n(ink[s],H,Row(0));finished[s]=true;continue;}
+            if (!move[s]) continue;
+            head[s]=dest[s];
+            if (!has(territory[s],dest[s])) {
+                open[s]=true;ink[s][yof[dest[s]]]|=Row(1)<<xof[dest[s]];
+            }
+        }
+        if (!bank[0] && !bank[1]) continue;
+        Row masks[2][HMAX]{};
+        for (int s=0;s<2;++s) if (bank[s]) captureFrom(territory[s],ink[s],masks[s]);
+        for (int y=0;y<H;++y) {
+            Row overlap=masks[0][y]&masks[1][y];
+            Row taken[2]{};
+            for (int s=0;s<2;++s) if (bank[s]) {
+                Row otherLine=bank[1-s] ? ink[1-s][y] : 0;
+                taken[s]=(ink[s][y]|(masks[s][y]&~(overlap|otherLine)))&~fort[id[1-s]][y];
+            }
+            for (int s=0;s<2;++s) territory[s][y]=(territory[s][y]&~taken[1-s])|taken[s];
+        }
+        for (int s=0;s<2;++s) if (bank[s]) {finished[s]=true;std::fill_n(ink[s],H,Row(0));}
+    }
+    int margin=0;
+    for (int y=0;y<H;++y) margin+=std::popcount(territory[0][y])-std::popcount(territory[1][y]);
+    return margin;
+}
+
+void refineClosing(Choice &best,vector<Choice>& options) {
+    if (count!=2 || ticksLeft>68 || best.path.empty() ||
+        (!closingOptions[0].weight && !closingOptions[1].weight)) return;
+    float pending=std::max(closingOptions[0].swing*closingOptions[0].weight,
+                           closingOptions[1].swing*closingOptions[1].weight);
+    if (std::abs(lead-0.5f*pending)>1.9f*ticksLeft+55.f) return;
+    std::sort(options.begin(),options.end(),[](const Choice &a,const Choice &b){return a.score>b.score;});
+    auto correction=[&](const Choice &c) {
+        Row line[HMAX],claim[HMAX];std::copy_n(lines[me],H,line);
+        for (int j=c.approach;j+1<int(c.path.size());++j) {
+            int k=c.path[j];line[yof[k]]|=Row(1)<<xof[k];
+        }
+        captureMask(me,line,claim);
+        int gain=0;
+        for (int y=0;y<H;++y) {
+            Row bits=claim[y]&~fort[rival][y];
+            gain+=std::popcount(bits)+std::popcount(bits&land[rival][y]);
+        }
+        float change=0.f;
+        for (const auto &r:closingOptions) if (r.weight>0) {
+            int remaining=ticksLeft-static_cast<int>(std::max(r.cells.size(),c.path.size()));
+            float noise=8.f+1.40f*remaining;
+            auto value=[&](float m){return m/(noise+std::abs(m));};
+            int independent=lead+gain-r.swing;
+            int actual=coupledMargin(c.path,r.cells);
+            change+=r.weight*(value(actual)-value(independent));
+        }
+        return 8.0f*change*clip((80.f-ticksLeft)/54.f,0.15f,1.f);
+    };
+    Choice original=best;
+    best.score+=correction(best);
+    int tried=0;
+    for (auto &c:options) {
+        if (++tried>20 || Steady::now()-started>std::chrono::milliseconds(30)) break;
+        float adjusted=std::min(original.score-0.02f,c.score)+correction(c);
+        if (c.path!=original.path && adjusted>best.score) {best=c;best.score=adjusted;}
+    }
 }
 
 struct Action {
@@ -2127,6 +2319,97 @@ int tacticalChoice(int normal,float top,const vector<Choice> &options,
     return selected;
 }
 
+// Solve joint moves in the last few ticks. A replacement must guarantee a
+// strictly better match result than the normal move can guarantee.
+struct DuelPosition {
+    Row owned[2][HMAX],ink[2][HMAX];
+    int head[2],face[2],margin;
+    bool outside[2];
+    DuelPosition():margin(pl[me].area-pl[rival].area) {
+        for (int s=0;s<2;++s) {
+            int id=s==0 ? me : rival;
+            std::copy_n(land[id],H,owned[s]);std::copy_n(lines[id],H,ink[s]);
+            head[s]=pl[id].pos;face[s]=pl[id].dir;outside[s]=pl[id].length>0;
+        }
+    }
+    void stepBoth(int ours,int theirs) {
+        int dirs[2]={ours,theirs},dest[2]={head[0]+step[ours],head[1]+step[theirs]};
+        bool wall[2]={own[dest[0]]==-3,own[dest[1]]==-3};
+        auto marked=[](const Row *rows,int k){return bool(rows[yof[k]]&(Row(1)<<xof[k]));};
+        bool clash=!wall[0]&&!wall[1]&&(dest[0]==dest[1]||(dest[0]==head[1]&&dest[1]==head[0]));
+        bool dead[2],bank[2]{};
+        for (int s=0;s<2;++s)
+            dead[s]=wall[s]||clash||(!wall[s]&&marked(ink[s],dest[s]))||
+                    (!wall[1-s]&&marked(ink[s],dest[1-s]));
+        for (int s=0;s<2;++s) {
+            int id=s==0 ? me : rival;
+            if (dead[s]) {
+                if (outside[s]) std::fill_n(ink[s],H,Row(0));
+                outside[s]=false;head[s]=spawn[id];face[s]=birthDir[id];continue;
+            }
+            head[s]=dest[s];face[s]=dirs[s];
+            if (marked(owned[s],dest[s])) bank[s]=outside[s];
+            else {outside[s]=true;ink[s][yof[dest[s]]]|=Row(1)<<xof[dest[s]];}
+        }
+        if (!bank[0]&&!bank[1]) return;
+        Row claims[2][HMAX]{};
+        for (int s=0;s<2;++s) if (bank[s]) captureFrom(owned[s],ink[s],claims[s]);
+        for (int y=0;y<H;++y) {
+            Row collision=claims[0][y]&claims[1][y],take[2]{};
+            for (int s=0;s<2;++s) if (bank[s]) {
+                int other=s==0 ? rival : me;
+                Row priority=bank[1-s] ? ink[1-s][y] : 0;
+                take[s]=(ink[s][y]|(claims[s][y]&~(priority|collision)))&~fort[other][y]&~owned[s][y];
+            }
+            margin+=std::popcount(take[0]) + std::popcount(take[0]&owned[1][y])
+                   -std::popcount(take[1]) - std::popcount(take[1]&owned[0][y]);
+            for (int s=0;s<2;++s) owned[s][y]=(owned[s][y]&~take[1-s])|take[s];
+        }
+        for (int s=0;s<2;++s) if (bank[s]) {outside[s]=false;std::fill_n(ink[s],H,Row(0));}
+    }
+};
+struct FinalSearch {
+    int nodes=0;
+    bool exhausted=false;
+    bool secure(const DuelPosition &from,int d,int left,int target) {
+        if (++nodes>11000 || ((nodes&31)==0 && Steady::now()-started>std::chrono::milliseconds(38))) {
+            exhausted=true;return false;
+        }
+        for (int rel:{0,1,3}) {
+            DuelPosition next=from;next.stepBoth(d,(from.face[1]+rel)&3);
+            if (left==1) {
+                if (next.margin<target) return false;
+                continue;
+            }
+            bool possible=false;
+            for (int turnBy:{0,1,3}) {
+                if (secure(next,(next.face[0]+turnBy)&3,left-1,target)) {possible=true;break;}
+                if (exhausted) return false;
+            }
+            if (!possible) return false;
+        }
+        return true;
+    }
+};
+
+int certifiedFinish(int normal) {
+    if (count!=2 || ticksLeft>4 || ticksLeft<1) return normal;
+    // Away from both exposed loops only a few tiles can move in four ticks.
+    if (std::abs(lead)>40 && pl[me].length<3 && pl[rival].length<3) return normal;
+    if (Steady::now()-started>std::chrono::milliseconds(27)) return normal;
+    DuelPosition root;
+    FinalSearch solver;
+    for (int target:{1,0}) {
+        if (solver.secure(root,normal,ticksLeft,target) || solver.exhausted) return normal;
+        for (int rel:{0,1,3}) {
+            int d=(root.face[0]+rel)&3;
+            if (d!=normal && solver.secure(root,d,ticksLeft,target)) {saved.clear();return d;}
+            if (solver.exhausted) return normal;
+        }
+    }
+    return normal;
+}
+
 int decide() {
     started=Steady::now();
     const auto &us=pl[me];
@@ -2165,6 +2448,8 @@ int decide() {
     Choice landPlan=planLand(saved,&alternatives);
     adjustSides(landPlan,alternatives);
     landPlan=lookAhead(std::move(landPlan),alternatives);
+    prepareClosingRoutes();
+    refineClosing(landPlan,alternatives);
     Action attack=interception(landPlan), patrol=guard();
     Action shadow=contain();
     if (shadow.score>attack.score) attack=shadow;
@@ -2201,7 +2486,7 @@ int decide() {
         normal=direction(us.pos,saved[0]); rate=landPlan.score;
     } else saved.clear();
     if (reset.first && attack.first==reset.first && rate==reset.score) return normal;
-    return tacticalChoice(normal,rate,alternatives,{attack,patrol,predicted,trade,reset},saved);
+    return certifiedFinish(tacticalChoice(normal,rate,alternatives,{attack,patrol,predicted,trade,reset},saved));
 }
 
 int run() {

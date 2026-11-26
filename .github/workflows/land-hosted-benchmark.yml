@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: f2d3618b46345036961ee619d359eab8756fc814
+          ref: 209e724aa3774d5c65341151e88e7b42c211a39b
           path: baseline
           persist-credentials: false
           sparse-checkout: community/land/naihe0__frontier-loop
@@ -101,5 +101,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unseen-maps
-          path: holdout-results/holdout.json
+          path: holdout-results/
           retention-days: 14

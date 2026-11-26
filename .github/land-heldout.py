@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import random
+import shutil
+import tempfile
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -15,7 +17,7 @@ import round_robin as rr
 
 ENTRY = Path("community/land/naihe0__frontier-loop/bot.cpp")
 PLAYER = "your-bot@you#1"
-MAP_SAMPLE_SEED = 202611261433791
+MAP_SAMPLE_SEED = 684245996601998
 STRONG_PAIRS = [
     ("sonnet-5", "anchor-sparring"), ("opus-5.5", "gpt-6-astra"),
     ("anchor-sparring", "opus-5.5"), ("gpt-6-astra", "sonnet-5"),
@@ -64,9 +66,21 @@ def play_pair(task):
     index, seed, seats, contenders, opponents = task
     order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
     results = {}
-    for version in order:
-        exes = [contenders[version] if player == PLAYER else opponents[player] for player in seats]
-        results[version] = rr.referee.run_match(exes, seats, seed)
+    with tempfile.TemporaryDirectory() as directory:
+        paths = {}
+        mode = "duel" if len(seats) == 2 else "melee"
+        for version in order:
+            exes = [contenders[version] if player == PLAYER else opponents[player] for player in seats]
+            paths[version] = Path(directory) / f"{mode}-{index:03d}-{seed}-{version}.json"
+            results[version] = rr.referee.run_match(exes, seats, seed, replay_path=str(paths[version]))
+        seat = seats.index(PLAYER)
+        def margin(result):
+            return result["areas"][seat] - max(a for i, a in enumerate(result["areas"]) if i != seat)
+        if any(result["ranks"][seat] != 1 or margin(result) <= 100 for result in results.values()):
+            replays = Path("holdout-results/replays")
+            replays.mkdir(parents=True, exist_ok=True)
+            for path in paths.values():
+                shutil.copyfile(path, replays / path.name)
     return {"seed": seed, "seats": seats, "results": results}
 
 
@@ -93,7 +107,7 @@ def main():
     official.update({src.parent.name.split("@")[0]: src for src in (LAND / "bots").glob("*/bot.cpp")})
     scripts = {version: Path(version) / ENTRY for version in ("baseline", "candidate")}
     hashes = {key: hashlib.sha256(source.read_bytes()).hexdigest() for key, source in scripts.items()}
-    assert hashes["baseline"] == "e9b35497668f1a53f64024774364215eab1714961ed3d89773a3cb0f6e300c84"
+    assert hashes["baseline"] == "7b3aa2ea8a663a205b66fee1aa9ed369a453409b7141810148556de7c6c85c5c"
     plans = dict(zip(("duel", "melee"), fixtures()))
     required = {player for rows in plans.values() for _, seats in rows for player in seats if player != PLAYER}
     opponents = {name: rr.build.compile_bot(str(official[name]), cache) for name in sorted(required)}
