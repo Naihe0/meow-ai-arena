@@ -192,6 +192,7 @@ int pressing[4]{}, completed[4]{}, confirmedDeadline, escapeThreat[M];
 float usualLength[4]={26.f,26.f,26.f,26.f};
 int cutDistance[4][4], thirdParty[4];
 float relevance[4];
+Row directReturnClaim[4][HMAX]{};
 struct Observation {
     vector<int> exposed;
     int pos[4]{}, deaths[4]{}, length[4]{}, couldDie[4]{}, promised=0;
@@ -265,6 +266,7 @@ void assessOpponents() {
         if (rival<0 || pl[i].area>pl[rival].area) rival=i;
         auto &p=pl[i];
         p.minCut=INF; p.rawGain=p.ourLoss=0;
+        if (!forecasting && count==4) std::fill_n(directReturnClaim[i],H,Row(0));
         if (p.length && p.home) {
             Row path[HMAX], gains[HMAX];
             std::copy_n(lines[i],H,path);
@@ -273,6 +275,7 @@ void assessOpponents() {
             captureMask(i,path,gains);
             for (int y=0; y<H; ++y) {
                 for (int j=0; j<count; ++j) if (j!=i) gains[y] &= ~fort[j][y];
+                if (!forecasting && count==4) directReturnClaim[i][y]=gains[y];
                 p.rawGain += std::popcount(gains[y]);
                 p.ourLoss += std::popcount(gains[y] & land[me][y]);
             }
@@ -654,9 +657,7 @@ struct Partial {
 
 Partial advance(const Partial &p,int d,int len) {
     int end=p.pos+len*step[d];
-    int arrival=dangerOn(p.pos,d,len);
-    if (count==4 && !forecasting) arrival=std::max(arrival,p.length+1);
-    return {end,p.length+len,std::min(p.eta,arrival),
+    return {end,p.length+len,std::min(p.eta,dangerOn(p.pos,d,len)),
             p.integral+edgeFlux(p.pos,end),p.edge+lineWeight(p.pos,end)};
 }
 
@@ -684,9 +685,7 @@ void exploreExit(const Exit &ex) {
             float interior=std::abs(p.integral+edgeFlux(p.pos,dest)-potential[dest]);
             area=std::max(edge,interior+edge*0.5f+0.4f);
         }
-        int arrival=dangerOn(p.pos,d,len-1);
-        if (count==4 && !forecasting) arrival=std::max(arrival,p.length+1);
-        int eta=std::min(p.eta,arrival);
+        int eta=std::min(p.eta,dangerOn(p.pos,d,len-1));
         float score=courseScore(area+enclosedValue,approach,p.length+len,eta,dest);
         // Distinct endpoints and departure points keep several shapes for exact scoring.
         unsigned key=static_cast<unsigned>(start*53 + (xof[dest]/3)*31 +
@@ -890,6 +889,15 @@ float interaction(const vector<int> &moves,int duration,int approach,const Row *
     float extra=0, survival=1.f;
     int dest=moves[duration-1];
     for (int i=0; i<count; ++i) if (i!=me && pl[i].active) {
+        const auto &e=pl[i];
+        if (count==4 && e.length>=2 && e.homeSteps>=1 && e.homeSteps<=duration &&
+            (directReturnClaim[i][yof[dest]]&(Row(1)<<xof[dest]))) {
+            // A pressured rival may bank by the shortest path instead of the
+            // expansion we forecast. Our planned return then ends outside home.
+            int chaser=std::min(cutDistance[me][i],thirdParty[i]);
+            float urgency=clip((e.homeSteps+9.f-chaser)/10.f,0.f,1.f);
+            survival*=1.f-(0.18f+0.52f*urgency)/(1.f+0.06f*e.homeSteps);
+        }
         const auto &f=future[i];
         if (!f.deadline) continue;
         int hit=INF, cut=INF;
@@ -902,6 +910,10 @@ float interaction(const vector<int> &moves,int duration,int approach,const Row *
             if (t>birth[them] || us==them || swap) cut=std::min(cut,t);
         }
         float conf=f.confidence;
+        if (count==4) {
+            int horizon=std::min(duration,f.deadline);
+            conf/=1.f+0.038f*std::max(0,horizon-4-std::min(f.streak,6));
+        }
         if (hit<INF && hit<cut) {
             float stake=(count==2 ? 0.62f : (i==rival ? 0.37f : 0.19f))*f.amount+0.72f*f.loss;
             extra+=conf*(4.f+stake)/(1.f+0.085f*hit);
@@ -1021,10 +1033,7 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
         }
         if (own[k]!=me) {
             outside=true;
-            // The rival cannot cut this part of a future trail before we reach it.
-            int drawnAt=t-approach+std::min(7,(approach+1)/2);
-            int arrival=count==4 && !forecasting ? std::max(threat[k],drawnAt) : threat[k];
-            eta=std::min(eta,arrival);
+            eta=std::min(eta,threat[k]);
             path[y]|=bit;
         } else if (outside) {
             if (seenOpp && !forecasting) {
