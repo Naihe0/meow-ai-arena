@@ -11,6 +11,11 @@ permissions:
 jobs:
   benchmark:
     if: github.repository == 'Naihe0/meow-ai-arena'
+    name: Community benchmark ${{ matrix.replica }}
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     steps:
@@ -48,11 +53,53 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: land-results
+          name: land-results-${{ matrix.replica }}
           path: |
             out/result.json
             out/summary.md
             official/land/challenge-runs/*/results.jsonl
             official/land/challenge-runs/*/ratings.json
           if-no-files-found: error
+          retention-days: 14
+
+  holdout:
+    name: Compare on twelve unseen maps
+    if: github.repository == 'Naihe0/meow-ai-arena'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            community/land/naihe0__frontier-loop
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 53c16cc2fcd6a1e51d58c1f54dfca68c8c772331
+          path: baseline
+          persist-credentials: false
+          sparse-checkout: community/land/naihe0__frontier-loop
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chen-006/meow-ai-arena
+          ref: 875e3f185126d0e50841b4dd22f3e47d7936de85
+          path: official
+          persist-credentials: false
+          sparse-checkout: |
+            land/bots
+            land/tournament
+            land/workspace
+
+      - name: Play both versions on unseen maps with the community referee
+        run: python3 candidate/.github/land-heldout.py
+
+      - name: Retain paired game records
+        uses: actions/upload-artifact@v4
+        with:
+          name: unseen-maps
+          path: holdout-results/holdout.json
           retention-days: 14
