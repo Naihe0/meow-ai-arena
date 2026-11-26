@@ -654,7 +654,9 @@ struct Partial {
 
 Partial advance(const Partial &p,int d,int len) {
     int end=p.pos+len*step[d];
-    return {end,p.length+len,std::min(p.eta,dangerOn(p.pos,d,len)),
+    int arrival=dangerOn(p.pos,d,len);
+    if (count==4 && !forecasting) arrival=std::max(arrival,p.length+1);
+    return {end,p.length+len,std::min(p.eta,arrival),
             p.integral+edgeFlux(p.pos,end),p.edge+lineWeight(p.pos,end)};
 }
 
@@ -682,7 +684,9 @@ void exploreExit(const Exit &ex) {
             float interior=std::abs(p.integral+edgeFlux(p.pos,dest)-potential[dest]);
             area=std::max(edge,interior+edge*0.5f+0.4f);
         }
-        int eta=std::min(p.eta,dangerOn(p.pos,d,len-1));
+        int arrival=dangerOn(p.pos,d,len-1);
+        if (count==4 && !forecasting) arrival=std::max(arrival,p.length+1);
+        int eta=std::min(p.eta,arrival);
         float score=courseScore(area+enclosedValue,approach,p.length+len,eta,dest);
         // Distinct endpoints and departure points keep several shapes for exact scoring.
         unsigned key=static_cast<unsigned>(start*53 + (xof[dest]/3)*31 +
@@ -1017,7 +1021,10 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
         }
         if (own[k]!=me) {
             outside=true;
-            eta=std::min(eta,threat[k]);
+            // The rival cannot cut this part of a future trail before we reach it.
+            int drawnAt=t-approach+std::min(7,(approach+1)/2);
+            int arrival=count==4 && !forecasting ? std::max(threat[k],drawnAt) : threat[k];
+            eta=std::min(eta,arrival);
             path[y]|=bit;
         } else if (outside) {
             if (seenOpp && !forecasting) {
