@@ -28,13 +28,33 @@ MELEE_TABLES = [
 ]
 
 
+def faces_centre(seed):
+    config = rr.referee.config_for(4)
+    starts, headings = rr.referee.make_start(seed, config)
+    x, y = starts[0]
+    dx, dy = {"R": (1, 0), "L": (-1, 0), "D": (0, 1), "U": (0, -1)}[headings[0]]
+    return dx * (config["width"] - 1 - 2 * x) + dy * (config["height"] - 1 - 2 * y) > 0
+
+
 def fixtures():
-    maps = random.Random(MAP_SAMPLE_SEED).sample(range(1_000_000, 2_000_000), 12)
+    rng = random.Random(MAP_SAMPLE_SEED)
+    pool = range(1_000_000, 2_000_000)
+    maps = rng.sample(pool, len(STRONG_PAIRS))
+    taken = set(maps)
+    headings = [True, False] * (len(MELEE_TABLES) // 2)
+    rng.shuffle(headings)
+    melee_maps = []
+    for inward in headings:
+        seed = rng.choice(pool)
+        while seed in taken or faces_centre(seed) != inward:
+            seed = rng.choice(pool)
+        taken.add(seed)
+        melee_maps.append(seed)
     duels, melee = [], []
-    for seed, opponents in zip(maps[:6], STRONG_PAIRS):
+    for seed, opponents in zip(maps, STRONG_PAIRS):
         for other in opponents:
             duels.extend([(seed, [PLAYER, other]), (seed, [other, PLAYER])])
-    for seed, opponents in zip(maps[6:], MELEE_TABLES):
+    for seed, opponents in zip(melee_maps, MELEE_TABLES):
         table = [PLAYER, *opponents]
         melee.extend((seed, table[i:] + table[:i]) for i in range(4))
     return duels, melee

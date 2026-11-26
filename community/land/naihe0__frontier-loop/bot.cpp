@@ -251,6 +251,26 @@ struct Observation {
     int pos[4]{}, deaths[4]{}, length[4]{}, couldDie[4]{}, promised=0;
 } previousTurn;
 
+float lostLoopWeight=0, observedLoopWeight=0;
+
+void observeReturns() {
+    if (count!=4 || turn==0 || pl[me].length) return;
+    int previousLength=previousTurn.length[me];
+    if (previousLength<3) return;
+    bool lost=pl[me].deaths>previousTurn.deaths[me];
+    // A deliberate reset far from a rival reveals little about cutting risk.
+    if (lost && !previousTurn.couldDie[me]) return;
+    float weight=clip(previousLength/12.f,0.25f,1.5f);
+    lostLoopWeight=0.84f*lostLoopWeight+(lost ? weight : 0.f);
+    observedLoopWeight=0.84f*observedLoopWeight+weight;
+}
+
+float returnPressure() {
+    float initial=launchTowardCentre ? 1.f : 0.f;
+    float actual=clip((lostLoopWeight-0.16f*observedLoopWeight)*4.f,-1.15f,1.8f*observedLoopWeight);
+    return clip((2.5f*initial + 1.3f*actual)/(2.5f+observedLoopWeight),-0.45f,1.7f);
+}
+
 void learnPursuit() {
     if (turn) for (int i=0; i<count; ++i) if (i!=me) {
         resets[i]*=0.9975f;
@@ -694,13 +714,13 @@ void prepareScore() {
         float scale=clip(0.75f+(pressure-0.50f)*1.75f,0.57f,1.43f);
         // Three opponents can cut an exposed loop. Bank sooner as its value grows.
         const float invested = clip(us.length / 20.f, 0.f, 1.f);
-        float inward=launchTowardCentre ? 1.f : 0.f;
+        float inward=returnPressure();
         caution *= scale * (1.45f + 0.63f*inward + 0.85f * invested);
         quad *= scale * (1.60f + 0.63f*inward + 1.30f * invested);
     }
     for (int i=0; i<160; ++i) riskTable[i]=1.f/(1.f+caution*i+quad*i*i);
     sunkCost=std::min(38,us.length)*0.66f;
-    if (!forecasting && count==4) sunkCost=(launchTowardCentre ? 1.4f : 2.8f)+0.32f*std::min(40,us.length);
+    if (!forecasting && count==4) sunkCost=(2.8f-1.4f*returnPressure())+0.32f*std::min(40,us.length);
     for (auto &c:candidates) c.score=-1e6f;
 }
 
@@ -2045,6 +2065,7 @@ int tacticalChoice(int normal,float top,const vector<Choice> &options,
 int decide() {
     started=Steady::now();
     const auto &us=pl[me];
+    observeReturns();
     learnPursuit();
     if (!saved.empty()) {
         if (saved[0]==us.pos) saved.erase(saved.begin());
