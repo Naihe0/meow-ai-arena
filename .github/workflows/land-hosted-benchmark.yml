@@ -1,0 +1,58 @@
+name: Land hosted benchmark
+run-name: Land benchmark · ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches: [codex/land-hosted-eval]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    if: github.repository == 'Naihe0/meow-ai-arena'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+          sparse-checkout: community/land/naihe0__frontier-loop
+
+      - name: Check out the community referee and opponents
+        uses: actions/checkout@v4
+        with:
+          repository: chen-006/meow-ai-arena
+          ref: 875e3f185126d0e50841b4dd22f3e47d7936de85
+          path: official
+          persist-credentials: false
+          sparse-checkout: |
+            community
+            land/bots
+            land/tournament
+            land/workspace
+
+      - name: Run the community benchmark
+        run: python3 official/community/check.py candidate/community/land/naihe0__frontier-loop --out "$GITHUB_WORKSPACE/out" --timeout 60
+
+      - name: Publish score summary
+        if: always()
+        run: |
+          if test -f out/summary.md; then
+            cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Retain scores and game records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: land-results
+          path: |
+            out/result.json
+            out/summary.md
+            official/land/challenge-runs/*/results.jsonl
+            official/land/challenge-runs/*/ratings.json
+          if-no-files-found: error
+          retention-days: 14
