@@ -15,7 +15,7 @@ import round_robin as rr
 
 ENTRY = Path("community/land/naihe0__frontier-loop/bot.cpp")
 PLAYER = "your-bot@you#1"
-MAP_SAMPLE_SEED = 202611260719363
+MAP_SAMPLE_SEED = 202611261433791
 STRONG_PAIRS = [
     ("sonnet-5", "anchor-sparring"), ("opus-5.5", "gpt-6-astra"),
     ("anchor-sparring", "opus-5.5"), ("gpt-6-astra", "sonnet-5"),
@@ -93,7 +93,7 @@ def main():
     official.update({src.parent.name.split("@")[0]: src for src in (LAND / "bots").glob("*/bot.cpp")})
     scripts = {version: Path(version) / ENTRY for version in ("baseline", "candidate")}
     hashes = {key: hashlib.sha256(source.read_bytes()).hexdigest() for key, source in scripts.items()}
-    assert hashes["baseline"] == "3e462856bb5a03e67b09bfebd5b9ee415d4b659a3866e7119624ffffb8d8c569"
+    assert hashes["baseline"] == "e9b35497668f1a53f64024774364215eab1714961ed3d89773a3cb0f6e300c84"
     plans = dict(zip(("duel", "melee"), fixtures()))
     required = {player for rows in plans.values() for _, seats in rows for player in seats if player != PLAYER}
     opponents = {name: rr.build.compile_bot(str(official[name]), cache) for name in sorted(required)}

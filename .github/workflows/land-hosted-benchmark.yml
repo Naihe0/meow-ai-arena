@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: 05c416ab48cf8c9aa7c542c4be70db7abdf59b3e
+          ref: f2d3618b46345036961ee619d359eab8756fc814
           path: baseline
           persist-credentials: false
           sparse-checkout: community/land/naihe0__frontier-loop

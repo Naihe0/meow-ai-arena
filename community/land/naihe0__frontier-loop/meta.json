@@ -2,7 +2,7 @@
   "author": "Naihe0",
   "github": "Naihe0",
   "name": "巡界",
-  "description": "单挑终盘按剩余回合和领地差决定拦截或收圈，四人局根据开局朝向和本局被切线的情况调整回家时机。",
+  "description": "单挑终盘按领地差决定拦截或收圈，四人局遇到频繁转向、扩张较慢的对手时，根据近期失地与附近对手的切线情况调整路线。",
   "written_by": "ai",
   "model": "GPT-6.2 Astra",
   "tool": "Codex",

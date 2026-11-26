@@ -251,6 +251,65 @@ struct Observation {
     int pos[4]{}, deaths[4]{}, length[4]{}, couldDie[4]{}, promised=0;
 } previousTurn;
 
+int priorHeading[4]{};
+float eligibleSteps[4]{}, turnsMade[4]{};
+bool unproductiveWanderer[4]{}, unevenExpansion=false;
+
+void observeExpansion() {
+    if (count!=4) return;
+    unevenExpansion=false;
+    for (int i=0;i<count;++i) if (i!=me) {
+        const auto &p=pl[i];
+        if (turn && p.deaths==previousTurn.deaths[i] && p.pos!=previousTurn.pos[i]) {
+            eligibleSteps[i]=eligibleSteps[i]*0.989f+1.f;
+            turnsMade[i]=turnsMade[i]*0.989f+(p.dir!=priorHeading[i]);
+        }
+        priorHeading[i]=p.dir;
+        if (eligibleSteps[i]>=14.f) {
+            float rate=turnsMade[i]/eligibleSteps[i];
+            bool small=p.area<36.f+0.84f*turn;
+            if (rate>0.49f && small) unproductiveWanderer[i]=true;
+            else if (rate<0.30f || !small) unproductiveWanderer[i]=false;
+        }
+        unevenExpansion|=unproductiveWanderer[i];
+    }
+}
+
+float localExposure[4]{}, failuresAgainst[4]{}, returnsAgainst[4]{};
+float localPressure=0;
+
+void observeLocalReturns() {
+    if (count!=4) return;
+    const auto &us=pl[me];
+    if (turn && !us.length && previousTurn.length[me]>=3) {
+        bool lost=us.deaths>previousTurn.deaths[me];
+        for (int i=0;i<count;++i) if (i!=me) {
+            float weight=clip(previousTurn.length[me]/12.f,0.25f,1.5f)*localExposure[i];
+            if (lost && !previousTurn.couldDie[me]) weight=0.f;
+            failuresAgainst[i]=0.88f*failuresAgainst[i]+(lost ? weight : 0.f);
+            returnsAgainst[i]=0.88f*returnsAgainst[i]+weight;
+            localExposure[i]=0.f;
+        }
+    }
+    float initial=launchTowardCentre ? 1.f : 0.f;
+    float sum=0.f,mass=0.f;
+    for (int i=0;i<count;++i) if (i!=me && pl[i].active) {
+        int reach=taxi(pl[i].pos,us.pos);
+        for (int k:us.trace) reach=std::min(reach,taxi(pl[i].pos,k));
+        float near=clip((24.f-reach)/24.f,0.f,1.f);
+        if (us.length) localExposure[i]=std::max(localExposure[i],near);
+        float loss=clip((failuresAgainst[i]-0.16f*returnsAgainst[i])*4.f,-1.15f,1.8f*returnsAgainst[i]);
+        float pressure=(2.5f*initial+1.3f*loss)/(2.5f+returnsAgainst[i]);
+        float weight=near*near;
+        sum+=weight*pressure;
+        mass+=weight;
+    }
+    localPressure=clip((0.20f*initial+sum)/(0.20f+mass),-0.45f,1.7f);
+}
+
+
+
+
 float lostLoopWeight=0, observedLoopWeight=0;
 
 void observeReturns() {
@@ -267,6 +326,12 @@ void observeReturns() {
 
 float returnPressure() {
     float initial=launchTowardCentre ? 1.f : 0.f;
+    if (unevenExpansion) {
+        float deficit=std::max(0.f,float(-lead)-24.f);
+        float lost=turn>=36 ? std::max(0.f,float(areaHistory[(turn-36)&63]-pl[me].area)) : 0.f;
+        float shift=clip((deficit+0.55f*lost)/105.f,0.f,1.f);
+        return initial+(localPressure-initial)*shift;
+    }
     float actual=clip((lostLoopWeight-0.16f*observedLoopWeight)*4.f,-1.15f,1.8f*observedLoopWeight);
     return clip((2.5f*initial + 1.3f*actual)/(2.5f+observedLoopWeight),-0.45f,1.7f);
 }
@@ -2065,6 +2130,8 @@ int tacticalChoice(int normal,float top,const vector<Choice> &options,
 int decide() {
     started=Steady::now();
     const auto &us=pl[me];
+    observeLocalReturns();
+    observeExpansion();
     observeReturns();
     learnPursuit();
     if (!saved.empty()) {
