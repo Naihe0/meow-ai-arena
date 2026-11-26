@@ -603,7 +603,7 @@ struct Candidate {
     float score=-1e6f;
     Course course;
 };
-constexpr int BINS=36;
+constexpr int BINS=66;
 Candidate candidates[BINS];
 float riskTable[160], sunkCost;
 
@@ -892,10 +892,13 @@ float interaction(const vector<int> &moves,int duration,int approach,const Row *
         for (int t=1; t<=std::min(duration,f.deadline); ++t) {
             int us=moves[t-1], them=f.moves[t-1];
             if (t>f.birth[us]) hit=std::min(hit,t);
-            if (t>birth[them] || us==them) cut=std::min(cut,t);
+            int previousUs=t==1 ? pl[me].pos : moves[t-2];
+            int previousThem=t==1 ? pl[i].pos : f.moves[t-2];
+            bool swap=us==previousThem && them==previousUs;
+            if (t>birth[them] || us==them || swap) cut=std::min(cut,t);
         }
         float conf=f.confidence;
-        if (hit<INF && hit<=cut) {
+        if (hit<INF && hit<cut) {
             float stake=(count==2 ? 0.62f : (i==rival ? 0.37f : 0.19f))*f.amount+0.72f*f.loss;
             extra+=conf*(4.f+stake)/(1.f+0.085f*hit);
             continue;
@@ -1118,7 +1121,7 @@ void shortestPaths(int clearance,bool returning) {
 void curvedRoutes(int clearance,vector<vector<int>> &routes) {
     shortestPaths(clearance,false); shortestPaths(clearance,true);
     struct Join { float score=-1e5f; int a=0,b=0,side=0; };
-    array<Join,32> tops;
+    array<Join,52> tops;
     const auto &us=pl[me];
     for (int j=0; j<cellCount; ++j) {
         int a=cells[j];
@@ -1143,7 +1146,7 @@ void curvedRoutes(int clearance,vector<vector<int>> &routes) {
         }
     }
     std::sort(tops.begin(),tops.end(),[](const Join &a,const Join &b){return a.score>b.score;});
-    for (int i=0; i<10 && tops[i].a; ++i) {
+    for (int i=0; i<16 && tops[i].a; ++i) {
         auto [score,a,b,side]=tops[i];
         vector<int> path;
         for (int k=a; k!=us.pos; k=outward[k].parent[side]) path.push_back(k);
@@ -1175,7 +1178,7 @@ Choice planLand(const vector<int> &previous,vector<Choice> *alternatives=nullptr
     for (const auto &e:exits()) exploreExit(e);
     std::sort(std::begin(candidates),std::end(candidates),
               [](const Candidate &a,const Candidate &b){return a.score>b.score;});
-    int amount=alternatives ? 25 : 14;
+    int amount=alternatives ? 42 : 14;
     for (int i=0; i<amount && candidates[i].score>-1e5f; ++i)
         add(unpack(candidates[i].course),1.f);
     if (alternatives) {
