@@ -15,6 +15,7 @@ import round_robin as rr
 
 ENTRY = Path("community/land/naihe0__frontier-loop/bot.cpp")
 PLAYER = "your-bot@you#1"
+MAP_SAMPLE_SEED = 202611260719363
 STRONG_PAIRS = [
     ("sonnet-5", "anchor-sparring"), ("opus-5.5", "gpt-6-astra"),
     ("anchor-sparring", "opus-5.5"), ("gpt-6-astra", "sonnet-5"),
@@ -28,7 +29,7 @@ MELEE_TABLES = [
 
 
 def fixtures():
-    maps = random.Random(202611260905).sample(range(1_000_000, 2_000_000), 12)
+    maps = random.Random(MAP_SAMPLE_SEED).sample(range(1_000_000, 2_000_000), 12)
     duels, melee = [], []
     for seed, opponents in zip(maps[:6], STRONG_PAIRS):
         for other in opponents:
@@ -72,7 +73,7 @@ def main():
     official.update({src.parent.name.split("@")[0]: src for src in (LAND / "bots").glob("*/bot.cpp")})
     scripts = {version: Path(version) / ENTRY for version in ("baseline", "candidate")}
     hashes = {key: hashlib.sha256(source.read_bytes()).hexdigest() for key, source in scripts.items()}
-    assert hashes["baseline"] == "8c27213d81629eb7039fb30280b366df28bfc247dcd386cf4ddb9d29dc54789d"
+    assert hashes["baseline"] == "3e462856bb5a03e67b09bfebd5b9ee415d4b659a3866e7119624ffffb8d8c569"
     plans = dict(zip(("duel", "melee"), fixtures()))
     required = {player for rows in plans.values() for _, seats in rows for player in seats if player != PLAYER}
     opponents = {name: rr.build.compile_bot(str(official[name]), cache) for name in sorted(required)}
@@ -86,7 +87,7 @@ def main():
         with ProcessPoolExecutor(workers) as pool:
             records[mode] = list(pool.map(play_pair, tasks))
         stats[mode] = {version: tally(records[mode], version) for version in scripts}
-    result = {"source_sha256": hashes, "stats": stats, "games": records}
+    result = {"map_sample_seed": MAP_SAMPLE_SEED, "source_sha256": hashes, "stats": stats, "games": records}
     (out / "holdout.json").write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
     report = ["## Previously unseen maps", "", "| Version | Duel on 6 maps | Four-player on 6 maps |",
               "|---|---:|---:|"]

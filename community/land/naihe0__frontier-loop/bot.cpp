@@ -21,6 +21,45 @@ constexpr char letters[] = "RDLU";
 int W, H, turns, count, me, turn;
 int own[M], trail[M], protect[M], xof[M], yof[M], spawn[4];
 int birthDir[4];
+int inputCell[HMAX][HMAX], inputDir[4], playerId[4];
+char outputLetter[4];
+
+int startX[4],startY[4];
+bool launchTowardCentre=false;
+void orientBoard(int facing) {
+    int x=startX[me],y=startY[me];
+    int offsetX=2*x-W+1,offsetY=2*y-H+1;
+    int radial=facing==0 ? offsetX : facing==2 ? -offsetX : facing==1 ? offsetY : -offsetY;
+    launchTowardCentre=radial<0;
+    // Use spawn-relative tie breaks for an opening that faces away from the centre.
+    const int mode=count==4 && (radial>0) ? 2 : 0;
+    int rawMe=me;
+    bool flipX=false,flipY=false,transpose=false;
+    if (mode && W==H) {
+        int nearX=std::min(x,W-1-x), nearY=std::min(y,H-1-y);
+        flipX=2*x>=W; flipY=2*y>=H;
+        transpose=nearX>nearY;
+        flipX=!flipX;
+    }
+    for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+        int u=flipX ? W-1-x : x, v=flipY ? H-1-y : y;
+        if (transpose) std::swap(u,v);
+        inputCell[y][x]=(v+1)*S+u+1;
+    }
+    const int dx[4]={1,0,-1,0},dy[4]={0,1,0,-1};
+    for (int d=0;d<4;++d) {
+        int u=flipX ? -dx[d] : dx[d], v=flipY ? -dy[d] : dy[d];
+        if (transpose) std::swap(u,v);
+        int relative=u>0 ? 0 : v>0 ? 1 : u<0 ? 2 : 3;
+        inputDir[d]=relative;
+        outputLetter[relative]=letters[d];
+    }
+    for (int i=0;i<count;++i) {
+        playerId[i]=mode ? (i-rawMe+count)%count : i;
+        spawn[playerId[i]]=inputCell[startY[i]][startX[i]];
+    }
+    me=playerId[rawMe];
+}
 int areaHistory[64]{};
 bool seekSpace=false;
 int cells[HMAX * HMAX], cellCount;
@@ -68,16 +107,28 @@ void initBoard() {
 bool readTurn() {
     std::string token, row;
     if (!(std::cin >> token >> turn)) return false;
-    for (int i=0; i<count; ++i) {
-        int id,x,y,len,area,deaths;
-        char dc;
-        std::cin >> token >> id >> x >> y >> dc >> len >> area >> deaths;
+    struct State {int id,x,y,len,area,deaths; char heading;};
+    State state[4]{};
+    for (int i=0;i<count;++i) {
+        auto &p=state[i];
+        std::cin >> token >> p.id >> p.x >> p.y >> p.heading >> p.len >> p.area >> p.deaths;
+    }
+    if (!turn) {
+        int heading=0;
+        for (int i=0;i<count;++i) if (state[i].id==me)
+            heading=static_cast<int>(std::string("RDLU").find(state[i].heading));
+        orientBoard(heading);
+        initBoard();
+    }
+    for (int i=0;i<count;++i) {
+        auto [id,x,y,len,area,deaths,dc]=state[i];
+        id=playerId[id];
         auto &p = pl[id];
         int old = p.pos;
-        p.pos = cell(x,y);
+        p.pos = inputCell[y][x];
         p.stationary = (old == p.pos && p.deaths == deaths) ? p.stationary+1 : 0;
         p.active = p.stationary < 3;
-        p.dir = static_cast<int>(std::string("RDLU").find(dc));
+        p.dir = inputDir[std::string("RDLU").find(dc)];
         if (!turn) birthDir[id]=p.dir;
         p.area = area; p.deaths = deaths; p.length = len;
         if (!len) {
@@ -96,18 +147,20 @@ bool readTurn() {
     for (int y=0; y<H; ++y) {
         std::cin >> row;
         for (int x=0; x<W; ++x) {
-            int id = row[x] == '.' ? -1 : row[x]-'0';
-            own[cell(x,y)] = id;
-            if (id >= 0) land[id][y] |= Row(1) << x;
+            int id = row[x] == '.' ? -1 : playerId[row[x]-'0'];
+            int k=inputCell[y][x];
+            own[k] = id;
+            if (id >= 0) land[id][yof[k]] |= Row(1) << xof[k];
         }
     }
     std::cin >> token;
     for (int y=0; y<H; ++y) {
         std::cin >> row;
         for (int x=0; x<W; ++x) {
-            int id = row[x] == '.' ? -1 : row[x]-'0';
-            trail[cell(x,y)] = id;
-            if (id >= 0) lines[id][y] |= Row(1) << x;
+            int id = row[x] == '.' ? -1 : playerId[row[x]-'0'];
+            int k=inputCell[y][x];
+            trail[k] = id;
+            if (id >= 0) lines[id][yof[k]] |= Row(1) << xof[k];
         }
     }
     std::cin >> token;
@@ -192,6 +245,7 @@ int pressing[4]{}, completed[4]{}, confirmedDeadline, escapeThreat[M];
 float usualLength[4]={26.f,26.f,26.f,26.f};
 int cutDistance[4][4], thirdParty[4];
 float relevance[4];
+Row directReturnClaim[4][HMAX]{};
 struct Observation {
     vector<int> exposed;
     int pos[4]{}, deaths[4]{}, length[4]{}, couldDie[4]{}, promised=0;
@@ -265,6 +319,7 @@ void assessOpponents() {
         if (rival<0 || pl[i].area>pl[rival].area) rival=i;
         auto &p=pl[i];
         p.minCut=INF; p.rawGain=p.ourLoss=0;
+        if (!forecasting && count==4) std::fill_n(directReturnClaim[i],H,Row(0));
         if (p.length && p.home) {
             Row path[HMAX], gains[HMAX];
             std::copy_n(lines[i],H,path);
@@ -273,6 +328,7 @@ void assessOpponents() {
             captureMask(i,path,gains);
             for (int y=0; y<H; ++y) {
                 for (int j=0; j<count; ++j) if (j!=i) gains[y] &= ~fort[j][y];
+                if (!forecasting && count==4) directReturnClaim[i][y]=gains[y];
                 p.rawGain += std::popcount(gains[y]);
                 p.ourLoss += std::popcount(gains[y] & land[me][y]);
             }
@@ -365,15 +421,7 @@ float lineWeight(int a,int b) {
     return std::abs(xof[a]==xof[b] ? sumCol[b]-sumCol[a] : sumRow[b]-sumRow[a]);
 }
 
-float contestedOpening=0.5f;
 void boardValues() {
-    if (count==2 && !forecasting) {
-        int other=1-me;
-        int separation=taxi(spawn[me],spawn[other]);
-        float advance=float(separation-taxi(spawn[me],pl[other].pos))/std::max(12,separation);
-        float behind=clip((pl[other].area-pl[me].area)/160.f,-1.f,1.f);
-        contestedOpening=clip(0.48f+0.82f*advance+0.13f*behind,0.14f,0.96f);
-    }
     Row empty[HMAX]{}, enclosed[HMAX];
     captureMask(me,empty,enclosed);
     enclosedValue=0;
@@ -390,12 +438,19 @@ void boardValues() {
                 float centrality = 1.f - std::max(std::abs(2*x-W+1)/float(W),
                                                   std::abs(2*y-H+1)/float(H));
                 float opening = clip((320.f-turn)/255.f, 0.f, 1.f);
-                float balance=1.f-clip(std::abs(taxi(spawn[me],k)-es)/19.f,0.f,1.f);
-                w*=1.f+opening*((2.55f-1.10f*contestedOpening)*centrality+
-                                1.75f*contestedOpening*balance+
-                                (0.48f-0.06f*contestedOpening)*front);
+                w *= 1.f + opening * (2.55f * centrality + 0.48f * front);
             }
-            if (!forecasting && count==4) w=1.23f-0.24f*front;
+            if (!forecasting && count==4) {
+                // Neutral land beyond an accessible frontier can support a second bank;
+                // raiding the leader is more valuable as the number of remaining banks falls.
+                float safe=clip((foeRange[k]-homeDist[k]+1.f)/18.f,0.f,1.f);
+                float opening=clip((410.f-turn)/260.f,0.f,1.f);
+                float border=1.f-clip(std::min({x,y,W-1-x,H-1-y})/10.f,0.f,1.f);
+                w=(1.23f-0.24f*front)*(1.f+0.72f*opening*safe*(0.65f+0.35f*border));
+                if (owner>=0 && owner!=me)
+                    w*=1.f+0.65f*clip((float(turn)-260.f)/190.f,0.f,1.f)*
+                          (0.38f+relevance[owner])*clip((foeRange[k]+3.f)/19.f,0.25f,1.f);
+            }
             if (!forecasting && seekSpace && owner<0) w*=1.18f;
             if (!forecasting) {
                 int border=std::min({x,y,W-1-x,H-1-y});
@@ -532,7 +587,7 @@ float strategicGain(const Row *claim) {
     if (count==2) {
         for (int g=0; g<2; ++g) for (int r=0; r<5; ++r) if (targetOpen[g][r]) {
             for (int y=0; y<H; ++y) if (strategicTargets[g][r][y]&claim[y]) {
-                gain+=(g ? 4.1f+1.2f*contestedOpening : 5.4f-1.7f*contestedOpening)-(0.3f-0.05f*contestedOpening)*r; break;
+                gain+=(g ? 4.1f : 5.4f)-0.3f*r; break;
             }
         }
     }
@@ -639,12 +694,13 @@ void prepareScore() {
         float scale=clip(0.75f+(pressure-0.50f)*1.75f,0.57f,1.43f);
         // Three opponents can cut an exposed loop. Bank sooner as its value grows.
         const float invested = clip(us.length / 20.f, 0.f, 1.f);
-        caution *= scale * (1.05f + 0.85f * invested);
-        quad *= scale * (1.20f + 1.30f * invested);
+        float inward=launchTowardCentre ? 1.f : 0.f;
+        caution *= scale * (1.45f + 0.63f*inward + 0.85f * invested);
+        quad *= scale * (1.60f + 0.63f*inward + 1.30f * invested);
     }
     for (int i=0; i<160; ++i) riskTable[i]=1.f/(1.f+caution*i+quad*i*i);
     sunkCost=std::min(38,us.length)*0.66f;
-    if (!forecasting && count==4) sunkCost=4.5f+0.32f*std::min(40,us.length);
+    if (!forecasting && count==4) sunkCost=(launchTowardCentre ? 1.4f : 2.8f)+0.32f*std::min(40,us.length);
     for (auto &c:candidates) c.score=-1e6f;
 }
 
@@ -897,6 +953,15 @@ float interaction(const vector<int> &moves,int duration,int approach,const Row *
     float extra=0, survival=1.f;
     int dest=moves[duration-1];
     for (int i=0; i<count; ++i) if (i!=me && pl[i].active) {
+        const auto &e=pl[i];
+        if (count==4 && e.length>=2 && e.homeSteps>=1 && e.homeSteps<=duration &&
+            (directReturnClaim[i][yof[dest]]&(Row(1)<<xof[dest]))) {
+            // A pressured rival may bank by the shortest path instead of the
+            // expansion we forecast. Our planned return then ends outside home.
+            int chaser=std::min(cutDistance[me][i],thirdParty[i]);
+            float urgency=clip((e.homeSteps+9.f-chaser)/10.f,0.f,1.f);
+            survival*=1.f-(0.18f+0.52f*urgency)/(1.f+0.06f*e.homeSteps);
+        }
         const auto &f=future[i];
         if (!f.deadline) continue;
         int hit=INF, cut=INF;
@@ -909,6 +974,10 @@ float interaction(const vector<int> &moves,int duration,int approach,const Row *
             if (t>birth[them] || us==them || swap) cut=std::min(cut,t);
         }
         float conf=f.confidence;
+        if (count==4) {
+            int horizon=std::min(duration,f.deadline);
+            conf/=1.f+0.038f*std::max(0,horizon-4-std::min(f.streak,6));
+        }
         if (hit<INF && hit<cut) {
             float stake=(count==2 ? 0.62f : (i==rival ? 0.37f : 0.19f))*f.amount+0.72f*f.loss;
             extra+=conf*(4.f+stake)/(1.f+0.085f*hit);
@@ -1052,11 +1121,39 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
                     float urgency=confirmedDeadline<=us.homeSteps+6 ? 0.65f : 0.21f;
                     score/=1.f+urgency*std::min(10,1-escapes[exit].slack);
                 }
+                if (count==2 && ticksLeft<=82.f && (lead<70 || (taxi(us.pos,pl[rival].pos)>24 && lead<150))) {
+                    // Compare the amount that can be banked by the final tick.
+                    // Short loops retain their rate advantage while there is
+                    // still time to complete a second large loop.
+                    int swing=0;
+                    for (int row=0;row<H;++row) {
+                        Row bits=gainMask[row]&~fort[rival][row];
+                        swing+=std::popcount(bits)+std::popcount(bits&land[rival][row]);
+                    }
+                    float cash=riskTable[std::clamp(t-approach+std::min(7,(approach+1)/2)+1-eta,0,159)];
+                    float left=ticksLeft-t;
+                    float later=std::max(0.f,left-5.f)*std::min(2.4f,0.1f*foeRange[k]);
+                    float total=(cash*swing+later)/(6.f+0.55f*ticksLeft);
+                    float urgency=0.76f*clip((82.f-ticksLeft+15.f)/82.f,0.f,1.f);
+                    score+=urgency*(total-score);
+                }
                 if (ticksLeft<=52) {
                     float frac=float(t)/ticksLeft;
                     score*=1.f+0.32f*frac*frac;
                     score+=finalStanding(gainMask,t,approach,eta);
                 }
+            }
+            if (!forecasting && count==2 && ticksLeft<=140 && lead < -24.f-1.12f*ticksLeft) {
+                float swing=0.f;
+                for(int y=0;y<H;++y) {
+                    Row bits=gainMask[y]&~fort[rival][y];
+                    swing+=std::popcount(bits)+std::popcount(bits&land[rival][y]);
+                }
+                float chance=riskTable[std::clamp(t-approach+std::min(7,(approach+1)/2)+1-eta,0,159)];
+                float later=float(std::max(0,ticksLeft-t-6));
+                float shortfall=float(-lead)-swing-later*1.5f;
+                score+=std::sqrt(chance)*clip((swing+later*0.34f)/(8.f+0.42f*ticksLeft),0.f,14.f);
+                if (shortfall>0) score/=1.f+0.004f*std::min(220.f,shortfall);
             }
             if (collisionPossible(moves[0])) score*=us.length ? 0.46f : 0.67f;
             score*=bias;
@@ -1204,23 +1301,9 @@ Choice planLand(const vector<int> &previous,vector<Choice> *alternatives=nullptr
     return best;
 }
 
-struct ReturnPrediction {
-    int bankStep=0, plannerStep=0, context=0;
-    unsigned samples[3]{};
-    float edge[3]{};
-} returnModel[4];
-
 void buildForecast(int id,int ours) {
     auto &f=future[id];
     const auto &e=pl[id];
-    auto &model=returnModel[id];
-    if (model.bankStep && model.plannerStep && model.bankStep!=model.plannerStep) {
-        int context=model.context;
-        float outcome=float(e.pos==model.bankStep)-float(e.pos==model.plannerStep);
-        unsigned data=++model.samples[context];
-        model.edge[context]+=(outcome-model.edge[context])/std::min(12u,data+3u);
-    }
-    model.bankStep=model.plannerStep=0;
     bool correct=!f.moves.empty() && f.moves.front()==e.pos;
     if (!f.moves.empty()) f.accuracy=0.968f*f.accuracy+0.032f*correct;
     if (correct) { f.moves.erase(f.moves.begin()); ++f.streak; }
@@ -1232,19 +1315,6 @@ void buildForecast(int id,int ours) {
         assessOpponents(); homeMaps(); boardValues(); geometry(); prepareScore();
         Choice guess=planLand(f.moves);
         f.moves=std::move(guess.path);
-    }
-    if (count==4 && e.length>=2 && e.home && e.homeSteps<=18 && !f.moves.empty()) {
-        int earliest=INF;
-        for (int j=0; j<count; ++j) if(j!=id) earliest=std::min(earliest,cutDistance[j][id]);
-        unsigned context=earliest<=e.homeSteps+4 ? 0 : (e.length+e.homeSteps>=usualLength[id] ? 1 : 2);
-        vector<int> banking;
-        for (int k=e.home; k!=e.pos; k=e.parent[k]) banking.push_back(k);
-        std::reverse(banking.begin(),banking.end());
-        if (!banking.empty()) {
-            model.bankStep=banking.front(); model.plannerStep=f.moves.front(); model.context=context;
-            if (model.samples[context]>=3 && model.edge[context]>0.16f)
-                f.moves=std::move(banking);
-        }
     }
     if (f.moves.empty()) return;
     Row path[HMAX];
@@ -1321,22 +1391,13 @@ float followup(const Choice &first,const PositionCopy &base) {
     for (int t=first.approach; t<duration-1; ++t) {
         int k=first.path[t]; path[yof[k]] |= Row(1)<<xof[k];
     }
-    array<std::pair<int,int>,4> bankOrder;
-    int banks=0;
     for (int i=0; i<count; ++i) if (i!=me && pl[i].active) {
         const auto &f=future[i];
         if (!f.deadline) continue;
         int advanceBy=std::min(duration,f.deadline);
         pl[i].pos=f.moves[advanceBy-1];
-        if (f.deadline<duration && f.confidence>0.55f)
-            bankOrder[banks++]={f.deadline,i};
+        if (f.deadline<duration && f.confidence>0.55f) paint(i,f.claims);
     }
-    std::sort(bankOrder.begin(),bankOrder.begin()+banks);
-    for (int j=0; j<banks; ++j) {
-        int i=bankOrder[j].second;
-        paint(i,future[i].claims);
-    }
-    if (own[first.path.back()]!=me) return 0.35f;
     captureMask(me,path,claims);
     paint(me,claims);
     auto &us=pl[me];
@@ -1366,6 +1427,48 @@ float followup(const Choice &first,const PositionCopy &base) {
     float high=0;
     for (const auto &c:candidates) high=std::max(high,c.score);
     return std::min(13.f,high);
+}
+
+
+// Move a straight side of a proposed circuit a few cells outward or inward.
+// This reaches shapes that an axis-aligned four-leg or shortest-path route misses.
+void adjustSides(Choice &best, vector<Choice> &options) {
+    if (count!=2 || ticksLeft>115 || options.empty() || (lead>=85 && taxi(pl[me].pos,pl[rival].pos)<22)) return;
+    vector<Choice> seeds=options;
+    std::sort(seeds.begin(),seeds.end(),[](const Choice&a,const Choice&b){return a.score>b.score;});
+    const auto &us=pl[me];
+    int used=0,tries=0;
+    for (const auto &seed:seeds) {
+        const auto &route=seed.path;
+        if (seed.score+0.1f<0.62f*seeds.front().score || used>=5 || tries>=125 ||
+            Steady::now()-started>std::chrono::milliseconds(24)) break;
+        if (route.size()<5) continue;
+        ++used;
+        for (int a=seed.approach;a+3<=int(route.size());) {
+            int origin=a ? route[a-1] : us.pos;
+            int d=direction(origin,route[a]),b=a+1;
+            while (b<int(route.size()) && route[b]-route[b-1]==step[d]) ++b;
+            for (int side:{(d+1)&3,(d+3)&3}) for (int depth:{1,2,4}) {
+                if (b-a<3 || int(route.size())+2*depth>ticksLeft || tries>=125) continue;
+                int x0=xof[origin],y0=yof[origin],x1=xof[route[b-1]],y1=yof[route[b-1]];
+                int dx=(side==0)-(side==2),dy=(side==1)-(side==3);
+                if (std::min(x0,x1)+depth*dx<0 || std::max(x0,x1)+depth*dx>=W ||
+                    std::min(y0,y1)+depth*dy<0 || std::max(y0,y1)+depth*dy>=H) continue;
+                vector<int> path(route.begin(),route.begin()+a);
+                int k=origin;
+                for (int j=0;j<depth;++j) {k+=step[side];path.push_back(k);}
+                for (int j=a;j<b;++j) {k+=step[d];path.push_back(k);}
+                for (int j=0;j<depth;++j) {k-=step[side];path.push_back(k);}
+                path.insert(path.end(),route.begin()+b,route.end());
+                Choice c;
+                evaluate(std::move(path),1.f,c); ++tries;
+                if (c.path.empty() || c.score<=seed.score+0.01f) continue;
+                if (c.score>best.score) best=c;
+                options.push_back(std::move(c));
+            }
+            a=b;
+        }
+    }
 }
 
 Choice lookAhead(Choice initial,vector<Choice> &alternatives) {
@@ -1506,6 +1609,45 @@ Action interception(const Choice &landPlan) {
             if (rate>best.score) best={route[0],rate};
         }
     }
+    return best;
+}
+
+
+// Applying pressure while a rival still has a small trail can force an early
+// return. A successful defence need not end in a cut.
+Action contain() {
+    Action best;
+    const auto &us=pl[me], &e=pl[rival];
+    if (count!=2 || ticksLeft>85 || !e.active || lead<12 || usualLength[rival]<24.f) return best;
+    const auto &f=future[rival];
+    float leadWeight=clip((lead-8.f)/(38.f+0.22f*ticksLeft),0.f,1.f);
+    int natural=std::clamp(int(usualLength[rival]+0.5f)-e.length,2,28);
+    int deadline=std::min(ticksLeft,std::max(e.homeSteps,natural));
+    float threatValue=std::min(100.f,0.14f*usualLength[rival]*usualLength[rival]);
+    if (us.length && us.homeSteps<=3 && us.homeSteps<cutNow) return best;
+    auto consider=[&](int k,int birth) {
+        int arrival=us.dist[k];
+        if (arrival<=birth || arrival>std::min(35,ticksLeft)) return;
+        auto way=routeTo(k,us.parent);
+        int breaks=us.length ? e.minCut : INF, risk=0, outside=0;
+        for (int t=1;t<=arrival;++t) {
+            int b=way[t-1];
+            risk=std::max(risk,t-breaks);
+            if (own[b]==me) { breaks=INF; continue; }
+            ++outside;
+            breaks=std::min(breaks,std::max(t,e.dist[b]));
+        }
+        float stake=threatValue+std::min(150,e.ourLoss+e.rawGain);
+        float rate=2.5f*leadWeight*(5.f+stake)/(arrival+6.f+0.50f*outside);
+        float late=std::max(0,arrival-deadline);
+        rate/=(1.f+0.16f*late+0.08f*std::max(0,arrival-e.homeSteps-4)+0.37f*risk);
+        if (birth) rate*=0.85f/(1.f+0.035f*birth);
+        if (rate>best.score) best={way.front(),rate};
+    };
+    for (int k:e.trace) consider(k,0);
+    if (f.deadline) for (int t=1;t<std::min(19,f.deadline);++t)
+        if (f.birth[f.moves[t-1]]==t) consider(f.moves[t-1],t);
+    if (e.length==0 && !f.deadline && atHome) consider(e.pos,0);
     return best;
 }
 
@@ -1933,14 +2075,31 @@ int decide() {
     prepareInfluence();
     vector<Choice> alternatives;
     Choice landPlan=planLand(saved,&alternatives);
+    adjustSides(landPlan,alternatives);
     landPlan=lookAhead(std::move(landPlan),alternatives);
     Action attack=interception(landPlan), patrol=guard();
+    Action shadow=contain();
+    if (shadow.score>attack.score) attack=shadow;
     Action predicted=ambush();
     if (predicted.score>attack.score) attack=predicted;
     Action trade=contact(landPlan);
     if (trade.score>attack.score) attack=trade;
     Action reset=relocation(landPlan);
     if (reset.score>attack.score) attack=reset;
+    if (count==2 && ticksLeft<=140 && lead < -24.f-1.12f*ticksLeft &&
+        !landPlan.path.empty() && landPlan.gain>6.f) {
+        // Denying a bank keeps existing territory. When already far behind,
+        // spend the remaining moves on a loop that can also change the result.
+        int cash=landPlan.outside+landPlan.approach;
+        float deficit=float(-lead);
+        float commitment=clip((deficit-0.85f*ticksLeft)/(25.f+deficit),0.f,1.f);
+        bool savingLine=us.length>=3 && pl[rival].minCut<=2 && cutDistance[me][rival]<=2;
+        if (!savingLine && attack.first!=landPlan.path.front())
+            attack.score*=std::max(0.16f,1.f-1.55f*commitment);
+        if (cash>=ticksLeft-2 && !savingLine && landPlan.gain>0.42f*deficit &&
+            attack.first!=landPlan.path.front()) attack.score*=0.35f;
+        patrol.score*=0.2f;
+    }
     int normal=fallback();
     float rate=0;
     if (attack.first && attack.score>std::max(landPlan.score*1.05f,patrol.score)) {
@@ -1966,14 +2125,13 @@ int run() {
     for (int i=0; i<count; ++i) {
         int id,x,y;
         std::cin >> token >> id >> x >> y;
-        spawn[id]=cell(x,y);
+        startX[id]=x; startY[id]=y;
     }
     for (int i=2; i<=HMAX; ++i) logs[i]=logs[i/2]+1;
-    initBoard();
     while (readTurn()) {
         int d=decide();
         rememberTurn();
-        std::cout << turn << ' ' << letters[d] << std::endl;
+        std::cout << turn << ' ' << outputLetter[d] << std::endl;
     }
     return 0;
 }
