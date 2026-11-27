@@ -1,858 +1,1365 @@
-#include "tron.hpp"
+// Cutline / 折线. Adapted from the MIT-licensed tournament programs
+// tron/sparring/sparring_hard.cpp and tron/bots/reference/gpt-6-astra-ultra-fast.cpp.
+// Copyright (c) 2026 Naihe0 and meow-ai-arena contributors.
+/*
+MIT License
 
+Copyright (c) 2026 meow-ai-arena contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+#include "tron.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
-namespace {
+namespace tactics {
+constexpr int MAXP = 43 * 43;
+constexpr int INF = 1 << 30;
+constexpr int WIN = 1 << 26;
 
-constexpr int side = tron::MAXW + 2;
-constexpr int cells = side * side;
-constexpr int inf = 30000;
-constexpr int victory = 20000;
+long long work = 0;
+long long check_at = 0;
+double margin = 8;
+int W, H, PW, N, ME;
+int DV[4];
+uint8_t blk[MAXP]; // 1 = 不能走：界外、障碍、任何轨迹（含头部）
+uint8_t col[MAXP]; // 棋盘格颜色 (x + y) & 1
+int head[tron::MAXN];
+bool alv[tron::MAXN];
 
-struct Board {
-    int step[4], size, seats, me, turn;
-    bool open[cells]{};
-    std::array<int, tron::MAXN> heads{};
+inline int prio(int k, int turn) { return ((k - turn) % N + N) % N; }
 
-    explicit Board(const tron::State& s)
-        : size((s.W + 2) * (s.H + 2)), seats(s.N), me(s.me), turn(s.turn) {
-        const int stride = s.W + 2;
-        step[0] = -stride;
-        step[1] = 1;
-        step[2] = stride;
-        step[3] = -1;
-        for (int y = 0; y < s.H; ++y)
-            for (int x = 0; x < s.W; ++x)
-                open[(y + 1) * stride + x + 1] = s.cell[y][x] == tron::EMPTY;
-        for (int k = 0; k < seats; ++k)
-            if (s.alive[k]) heads[k] = (s.y[k] + 1) * stride + s.x[k] + 1;
-    }
+// ---------------------------------------------------------------- Voronoi
+uint32_t vstamp = 0;
+uint32_t seen[MAXP];
+int lay[MAXP];
+int8_t own[MAXP];
+uint16_t msk[MAXP];
+int qa[MAXP], qb[MAXP];
+int vid[tron::MAXN], vturn; // 各源的玩家编号、BFS 第 0 层对应的回合（同时到达时按优先级判给谁）
 
-    int degree(int p) const {
-        return open[p + step[0]] + open[p + step[1]] + open[p + step[2]] + open[p + step[3]];
-    }
-    int priority(int k, int time) const {
-        return (k + seats - time % seats) % seats;
-    }
+struct Vor {
+    int cnt[tron::MAXN];
+    int edges[tron::MAXN];
+    int par[tron::MAXN][2]; // 各人地盘里两种颜色的格数
+    uint16_t conn;          // 与我（src 0）相遇过的人（位）
+    int meet[tron::MAXN];   // 与我第一次相遇的层数
 };
 
-using Distances = std::array<short, cells>;
-
-void distances(const Board& b, const int* sources, int n, Distances& ds) {
-    std::fill_n(ds.begin(), b.size, short(inf));
-    short queue[cells];
-    int tail = 0;
-    for (int i = 0; i < n; ++i) {
-        int p = sources[i];
-        if (p) {
-            ds[p] = 0;
-            queue[tail++] = short(p);
-        }
+// srcs[0] 是"我"，vid[] 是各源的编号。同时出发的 BFS：严格先到的格子归他；
+// 同时到的格子按到达那一回合的抢格优先级记给优先者，但不再向外扩。
+void voronoi(const int *srcs, int ns, Vor &v) {
+    if (++vstamp == 0) {
+        std::memset(seen, 0, sizeof seen);
+        vstamp = 1;
     }
-    for (int front = 0; front < tail; ++front) {
-        const int p = queue[front];
-        const short next = short(ds[p] + 1);
-        for (int d : b.step) {
-            const int q = p + d;
-            if (b.open[q] && ds[q] == inf) {
-                ds[q] = next;
-                queue[tail++] = short(q);
+    for (int i = 0; i < ns; ++i) {
+        v.cnt[i] = v.edges[i] = v.par[i][0] = v.par[i][1] = 0;
+        v.meet[i] = INF;
+    }
+    v.conn = 0;
+    int *cur = qa;
+    int *nxt = qb;
+    int nc = 0;
+    for (int i = 0; i < ns; ++i) {
+        const int p = srcs[i];
+        cur[nc++] = p;
+        own[p] = int8_t(i);
+        seen[p] = vstamp;
+        lay[p] = -1;
+        msk[p] = uint16_t(1u << i);
+    }
+    for (int L = 0; nc; ++L) {
+        int nn = 0;
+        for (int i = 0; i < nc; ++i) {
+            const int p = cur[i];
+            const int o = own[p];
+            const uint16_t ob = uint16_t(1u << o);
+            for (int d = 0; d < 4; ++d) {
+                const int t = p + DV[d];
+                if (blk[t])
+                    continue;
+                if (seen[t] != vstamp) {
+                    seen[t] = vstamp;
+                    lay[t] = L;
+                    own[t] = int8_t(o);
+                    msk[t] = ob;
+                    nxt[nn++] = t;
+                } else if (!(msk[t] & ob)) {
+                    const uint16_t m = msk[t];
+                    if (o == 0) {
+                        v.conn |= m;
+                        for (int j = 1; j < ns; ++j)
+                            if ((m >> j & 1) && v.meet[j] == INF)
+                                v.meet[j] = L;
+                    } else if (m & 1) {
+                        v.conn |= ob;
+                        if (v.meet[o] == INF)
+                            v.meet[o] = L;
+                    }
+                    if (lay[t] == L) {
+                        msk[t] |= ob;
+                        own[t] = -1;
+                    }
+                }
             }
         }
-    }
-}
-
-void rivals(const Board& b, int who, Distances& ds) {
-    auto sources = b.heads;
-    sources[who] = 0;
-    distances(b, sources.data(), b.seats, ds);
-}
-
-// Removing a cut vertex makes its branches mutually exclusive for a simple path.
-// On the block-cut tree a trail can use one chain of blocks from its starting head.
-struct Chambers {
-    const Board& b;
-    const Distances& us;
-    const Distances& them;
-    short seen[cells], low[cells], stack[cells];
-    int branch[cells];
-    int top = 0, number = 0, area = 0, start = 0;
-    bool alone;
-
-    Chambers(const Board& board, const Distances& mine, const Distances& others, bool isolated)
-        : b(board), us(mine), them(others), alone(isolated) {
-        std::fill_n(seen, b.size, short(0));
-    }
-
-    int weight(int p) const {
-        if (alone || us[p] < them[p]) return 4;
-        return 2;
-    }
-
-    void visit(int p, int parent) {
-        seen[p] = low[p] = short(++number);
-        stack[top++] = short(p);
-        branch[p] = 0;
-        for (int d : b.step) {
-            const int q = p + d;
-            if (q == parent || (!b.open[q] && q != start) || (!alone && us[q] > them[q])) continue;
-            if (seen[q]) {
-                low[p] = std::min(low[p], seen[q]);
+        int k = 0;
+        for (int i = 0; i < nn; ++i) {
+            const int t = nxt[i];
+            const int o = own[t];
+            if (o < 0) {
+                int w = -1;
+                for (int j = 0; j < ns; ++j)
+                    if ((msk[t] >> j & 1) &&
+                        (w < 0 || prio(vid[j], vturn + L) < prio(vid[w], vturn + L)))
+                        w = j;
+                ++v.cnt[w];
+                ++v.par[w][col[t]];
                 continue;
             }
-            visit(q, p);
-            low[p] = std::min(low[p], low[q]);
-            if (low[q] < seen[p]) continue;
-            int colors[2]{}, tail = 0, v;
-            do {
-                v = stack[--top];
-                colors[v & 1] += weight(v);
-                tail = std::max(tail, branch[v]);
-            } while (v != q);
-            area += colors[0] + colors[1];
-            // Every grid path alternates colors. One extra square can be an endpoint.
-            int room = std::min(colors[0] + colors[1], 2 * std::min(colors[0], colors[1]) + 4);
-            branch[p] = std::max(branch[p], room + tail);
+            ++v.cnt[o];
+            ++v.par[o][col[t]];
+            int e = 0;
+            for (int d = 0; d < 4; ++d)
+                e += !blk[t + DV[d]];
+            v.edges[o] += e;
+            nxt[k++] = t;
         }
+        nc = k;
+        work += nn;
+        int *tmp = cur;
+        cur = nxt;
+        nxt = tmp;
     }
-
-    int value(int root) {
-        start = root;
-        visit(root, 0);
-        return branch[root];
-    }
-};
-
-int passage(const Board& b, const Distances& ds, int p) {
-    int answer = inf;
-    for (int d : b.step)
-        if (b.open[p+d]) answer = std::min(answer, int(ds[p+d]) + 1);
-    return answer;
 }
 
-struct DuelField {
-    const Board& board;
-    int nextTime, opponent;
-    signed char owner[cells]{}, weight[cells]{};
-    short distance[cells], queue[cells], order[cells]{}, low[cells], stack[cells];
-    short continuation[cells];
-    int top = 0, serial = 0;
-    int total[2]{}, links[2]{}, oneWay[2]{};
-    bool joined = false;
+// 地盘里"真正走得到"的格数（关节点估计）：在 voronoi 之后调用，只走 own == i 的格子。
+// 从头部出发做 Tarjan：子树被关节点隔开时，走进去就回不来，只能选一个这样的死胡同走到底；
+// 其余的（能绕回来的）都能走到。返回 可回来的格数 + 最好的一条死胡同。
+uint32_t cst[MAXP], cstamp = 0;
+int dfn[MAXP], lowv[MAXP], ctimer;
+int cown;
+struct AB {
+    int a, b;
+};
+AB chamber_dfs(int v) {
+    int A = 1, B = 0;
+    for (int d = 0; d < 4; ++d) {
+        const int t = v + DV[d];
+        if (blk[t] || seen[t] != vstamp || own[t] != cown)
+            continue;
+        if (cst[t] != cstamp) {
+            cst[t] = cstamp;
+            dfn[t] = lowv[t] = ++ctimer;
+            const AB r = chamber_dfs(t);
+            if (lowv[t] < lowv[v])
+                lowv[v] = lowv[t];
+            if (lowv[t] >= dfn[v]) {
+                if (r.a + r.b > B)
+                    B = r.a + r.b;
+            } else {
+                A += r.a;
+                if (r.b > B)
+                    B = r.b;
+            }
+        } else if (dfn[t] < lowv[v])
+            lowv[v] = dfn[t];
+    }
+    return {A, B};
+}
+int chamber(int h, int i) {
+    if (++cstamp == 0) {
+        std::memset(cst, 0, sizeof cst);
+        cstamp = 1;
+    }
+    cown = i;
+    cst[h] = cstamp;
+    dfn[h] = lowv[h] = ctimer = 0;
+    const AB r = chamber_dfs(h);
+    return r.a - 1 + r.b;
+}
 
-    DuelField(const Board& b, int a, int e, int other, int time)
-        : board(b), nextTime(time), opponent(other) {
-        std::fill_n(distance, b.size, short(inf));
-        queue[0] = short(a);
-        queue[1] = short(e);
-        distance[a] = distance[e] = 0;
-        owner[e] = 1;
-        int count = 2, start = 0;
-        unsigned char tieWinner[tron::MAXN];
-        for (int i = 0; i < b.seats; ++i)
-            tieWinner[i] = b.priority(b.me, i) > b.priority(other, i);
-        int priorityTurn = time % b.seats;
-        while (start < count) {
-            const int end = count;
-            for (; start < end; ++start) {
-                int p = queue[start], k = owner[p], depth = distance[p] + 1;
-                for (int d : b.step) {
-                    int q = p + d;
-                    if (!b.open[q]) continue;
-                    if (distance[q] == inf) {
-                        distance[q] = short(depth);
-                        owner[q] = (signed char)k;
-                        weight[q] = 4;
-                        queue[count++] = short(q);
-                    } else if (owner[q] != k) {
-                        joined = true;
-                        if (distance[q] == depth) {
-                            owner[q] = (signed char)tieWinner[priorityTurn];
-                            weight[q] = 3;
+// 奇偶上界：从 h 出发能走的最多步数（区域里两种颜色的格数为 par）
+inline int parity_bound(int h, const int par[2]) {
+    const int first = par[col[h] ^ 1], second = par[col[h]];
+    return first > second ? 2 * second + 1 : 2 * first;
+}
+
+int RIV; // 对手编号
+
+long long limit;
+bool aborted;
+
+int srcbuf[tron::MAXN];
+int evaluate_position(int a, int b, int turn, bool /*both_alive*/) {
+    work += 40;
+    int ns = 0;
+    vid[ns] = ME;
+    srcbuf[ns++] = a;
+    vid[ns] = RIV;
+    srcbuf[ns++] = b;
+    vturn = turn;
+    Vor v;
+    voronoi(srcbuf, ns, v);
+    const int ca = chamber(a, 0), cb = chamber(b, 1);
+    const int pa = parity_bound(a, v.par[0]), pb = parity_bound(b, v.par[1]);
+    work += v.cnt[0] + v.cnt[1];
+    if (!(v.conn & 2)) {
+        const int left = std::min(ca, pa), right = std::min(cb, pb);
+        const int quality = (v.edges[0] - 2 * v.cnt[0]) - (v.edges[1] - 2 * v.cnt[1]);
+        const int advantage = 100 * (left - right) + std::clamp(quality, -95, 95);
+        // A narrow parity lead is uncertain. A large lead in two closed chambers is decisive.
+        return 8 * advantage / (12 + (left + right) / 12) + std::clamp(advantage * 5, -4600, 4600);
+    }
+    return 9 * (ca - cb) + 2 * (std::min(ca, pa) - std::min(cb, pb)) + (v.edges[0] - v.edges[1]);
+}
+
+// 置换表
+struct TT {
+    uint64_t key;
+    int val;
+    int8_t depth, flag, ma, mb;
+};
+constexpr int TTSIZE = 1 << 18;
+TT tt[TTSIZE];
+uint64_t ZC[MAXP], ZA[MAXP], ZB[MAXP], ZT[tron::MAXN], ZR[tron::MAXN];
+uint64_t root_hash; // 根局面所有轨迹格的 ZC 异或（置换表跨回合保留）
+bool zinit = false;
+
+uint64_t sm(uint64_t &s) {
+    uint64_t z = (s += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+struct Leaf {
+    uint64_t key;
+    int value;
+};
+Leaf leaves[1 << 16];
+int evaluate(int a, int b, int turn, uint64_t trails) {
+    const auto key = trails ^ ZA[a] ^ ZB[b] ^ ZT[turn % N];
+    auto &entry = leaves[key & ((1 << 16) - 1)];
+    if (entry.key == key) {
+        work += 15;
+        return entry.value;
+    }
+    const int value = evaluate_position(a, b, turn, true);
+    entry = {key, value};
+    return value;
+}
+int root_turn;
+
+// 置换表里的胜负分按"离本节点几步"存，取出时换回"离根几步"
+constexpr int MATE = WIN - 10000;
+inline int to_tt(int v, int ply) { return v >= MATE ? v + ply : v <= -MATE ? v - ply : v; }
+inline int from_tt(int v, int ply) { return v >= MATE ? v - ply : v <= -MATE ? v + ply : v; }
+
+// 我走 da、对手走 db 之后的结果。返回 0 = 都活；否则 1 我死、2 对手死、3 都死
+inline int outcome(int a, int b, int da, int db, int turn) {
+    const int ta = a + DV[da], tb = b + DV[db];
+    bool dA = blk[ta], dB = blk[tb];
+    if (!dA && !dB && ta == tb) {
+        if (prio(ME, turn) < prio(RIV, turn))
+            dB = true;
+        else
+            dA = true;
+    }
+    return (dA ? 1 : 0) | (dB ? 2 : 0);
+}
+
+int search(int a, int b, int depth, int alpha, int beta, int ply, uint64_t hash) {
+    const int turn = root_turn + ply;
+    if (work >= check_at) {
+        check_at = work + 18000;
+        if (tron::budget_left() < margin) {
+            aborted = true;
+            return 0;
+        }
+    }
+    if (depth <= 0 && N == 2)
+        return evaluate(a, b, turn, hash);
+    if (depth <= 0) {
+        bool a_has_move = false, b_has_move = false;
+        for (int d = 0; d < 4; ++d) {
+            a_has_move |= !blk[a + DV[d]];
+            b_has_move |= !blk[b + DV[d]];
+        }
+        if (!a_has_move || !b_has_move)
+            return a_has_move ? WIN - ply : b_has_move ? -WIN + ply : 0;
+        return evaluate(a, b, turn, hash);
+    }
+    if (work >= limit) {
+        aborted = true;
+        return 0;
+    }
+    work += 10;
+    int ma[4], nma = 0, mb[4], nmb = 0;
+    for (int d = 0; d < 4; ++d) {
+        if (!blk[a + DV[d]])
+            ma[nma++] = d;
+        if (!blk[b + DV[d]])
+            mb[nmb++] = d;
+    }
+    if (nma == 0)
+        return nmb == 0 ? 0 : -WIN + ply;
+    if (nmb == 0)
+        return WIN - ply;
+    const uint64_t key = hash ^ ZA[a] ^ ZB[b] ^ ZT[turn % N] ^ ZR[RIV];
+    TT &e = tt[key & (TTSIZE - 1)];
+    int hint_a = -1, hint_b = -1;
+    if (e.key == key) {
+        if (e.depth >= depth) {
+            const int ev = from_tt(e.val, ply);
+            if (e.flag == 0)
+                return ev;
+            if (e.flag == 1 && ev >= beta)
+                return ev;
+            if (e.flag == 2 && ev <= alpha)
+                return ev;
+        }
+        hint_a = e.ma;
+        hint_b = e.mb;
+    }
+    if (hint_a >= 0)
+        for (int i = 0; i < nma; ++i)
+            if (ma[i] == hint_a) {
+                ma[i] = ma[0];
+                ma[0] = hint_a;
+                break;
+            }
+    const int a0 = alpha;
+    int best = -INF, bma = ma[0], bmb = -1;
+    for (int i = 0; i < nma; ++i) {
+        const int da = ma[i], ta = a + DV[da];
+        int order[4], no = 0;
+        if (hint_b >= 0)
+            for (int j = 0; j < nmb; ++j)
+                if (mb[j] == hint_b)
+                    order[no++] = hint_b;
+        for (int j = 0; j < nmb; ++j)
+            if (mb[j] != hint_b)
+                order[no++] = mb[j];
+        int worst = INF, wr = order[0];
+        for (int j = 0; j < no; ++j) {
+            const int db = order[j], tb = b + DV[db];
+            const int oc = outcome(a, b, da, db, turn);
+            int v;
+            if (oc == 1)
+                v = -WIN + ply;
+            else if (oc == 3)
+                v = 0;
+            else if (oc == 2)
+                v = WIN - ply;
+            else {
+                blk[ta] = blk[tb] = 1;
+                v = search(ta, tb, depth - 1, alpha, worst < beta ? worst : beta, ply + 1,
+                           hash ^ ZC[ta] ^ ZC[tb]);
+                blk[ta] = blk[tb] = 0;
+            }
+            if (aborted)
+                return 0;
+            if (v < worst)
+                worst = v, wr = db;
+            if (worst <= alpha)
+                break;
+        }
+        if (worst > best)
+            best = worst, bma = da, bmb = wr;
+        if (best > alpha)
+            alpha = best;
+        if (alpha >= beta)
+            break;
+    }
+    e.key = key;
+    e.val = to_tt(best, ply);
+    e.depth = int8_t(depth);
+    e.flag = best <= a0 ? 2 : best >= beta ? 1 : 0;
+    e.ma = int8_t(bma);
+    e.mb = int8_t(bmb);
+    return best;
+}
+
+int duel(int last, int turn) {
+    const int a = head[ME], b = head[RIV];
+    int ma[4], nma = 0;
+    ma[nma++] = last;
+    for (int d = 0; d < 4; ++d)
+        if (d != last)
+            ma[nma++] = d;
+    int k = 0;
+    for (int i = 0; i < nma; ++i)
+        if (!blk[a + DV[ma[i]]])
+            ma[k++] = ma[i];
+    nma = k;
+    if (nma < 2)
+        return nma ? ma[0] : last;
+    int mb[4], nmb = 0;
+    for (int d = 0; d < 4; ++d)
+        if (!blk[b + DV[d]])
+            mb[nmb++] = d;
+    work = 0;
+    check_at = 0;
+    limit = turn ? 23000000 : 100000000;
+    margin = turn ? 8.0 : 1650.0;
+    root_turn = turn;
+    root_hash = 0;
+    for (int p = 0; p < (H + 2) * PW; ++p)
+        if (blk[p])
+            root_hash ^= ZC[p];
+    int best_move = ma[0];
+    for (int depth = 1; depth <= 60; ++depth) {
+        aborted = false;
+        int best = -INF, bm = ma[0];
+        for (int i = 0; i < nma; ++i) {
+            const int da = ma[i], ta = a + DV[da];
+            int worst = INF;
+            if (nmb == 0)
+                return da;
+            for (int j = 0; j < nmb; ++j) {
+                const int db = mb[j], tb = b + DV[db];
+                const int oc = outcome(a, b, da, db, turn);
+                int v;
+                if (oc == 1)
+                    v = -WIN;
+                else if (oc == 3)
+                    v = 0;
+                else if (oc == 2)
+                    v = WIN;
+                else {
+                    blk[ta] = blk[tb] = 1;
+                    v = search(ta, tb, depth - 1, best, worst, 1, root_hash ^ ZC[ta] ^ ZC[tb]);
+                    blk[ta] = blk[tb] = 0;
+                }
+                if (aborted)
+                    break;
+                if (v < worst)
+                    worst = v;
+                if (worst <= best)
+                    break;
+            }
+            if (aborted)
+                break;
+            if (worst > best)
+                best = worst, bm = da;
+        }
+        if (aborted)
+            break; // 本层没搜完：用上一层的结果
+        best_move = bm;
+        // 上一层的最好走法排到最前
+        for (int i = 0; i < nma; ++i)
+            if (ma[i] == bm) {
+                for (int j = i; j > 0; --j)
+                    ma[j] = ma[j - 1];
+                ma[0] = bm;
+                break;
+            }
+        if (best >= WIN - 100 || best <= -WIN + 100)
+            break;
+    }
+    return best_move;
+}
+
+int pursue(const tron::State &s, int rival_id) {
+    if (!zinit) {
+        uint64_t seed = 12345;
+        for (int i = 0; i < MAXP; ++i)
+            ZC[i] = sm(seed), ZA[i] = sm(seed), ZB[i] = sm(seed);
+        for (int k = 0; k < tron::MAXN; ++k)
+            ZT[k] = sm(seed), ZR[k] = sm(seed);
+        zinit = true;
+    }
+    W = s.W;
+    H = s.H;
+    N = s.N;
+    ME = s.me;
+    PW = W + 2;
+    DV[tron::U] = -PW;
+    DV[tron::R] = 1;
+    DV[tron::D] = PW;
+    DV[tron::L] = -1;
+    std::memset(blk, 1, sizeof blk);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const int p = (y + 1) * PW + x + 1;
+            blk[p] = s.cell[y][x] != tron::EMPTY;
+            col[p] = uint8_t((x + y) & 1);
+        }
+    for (int k = 0; k < N; ++k) {
+        head[k] = (s.y[k] + 1) * PW + s.x[k] + 1;
+        alv[k] = s.alive[k];
+    }
+    const int last = s.last_dir[ME];
+    RIV = rival_id;
+    return duel(last, s.turn);
+}
+
+} // namespace tactics
+namespace {
+constexpr int SZ = 43 * 43, STR = 43, INF = 30000;
+constexpr int delta[4] = {-STR, 1, STR, -1};
+// Simultaneous adversarial search, with a separate persistent path planner
+// once no other live player can enter our connected component.
+struct Bot {
+    unsigned char wall[SZ]{};
+    int pos[12], live[12], N, me, turn, W, H;
+    short dist[12][SZ], closest[SZ];
+    unsigned short masks[SZ];
+    int owner[SZ], tin[SZ], low[SZ], timer, queue[SZ], nodes = 0, evals = 0, rival = -1;
+    bool abort = false;
+    double stop = 8;
+    unsigned long long rng = 0x9e3779b97f4a7c15ULL;
+    std::vector<int> saved;
+    int savedTurn = -1;
+    struct EvalEntry {
+        uint64_t key = 0;
+        double value = 0;
+        unsigned generation = 0;
+        bool sep = false;
+    };
+    struct TTEntry {
+        uint64_t key = 0;
+        double value = 0;
+        unsigned generation = 0;
+        short depth = 0;
+        char bound = 0;
+    };
+    std::array<EvalEntry, 32768> ec;
+    std::array<TTEntry, 32768> tt;
+    uint64_t zcell[SZ], zhead[12][SZ], zt[12], hash = 0;
+    unsigned generation = 0;
+    bool hashReady = false, separated = false;
+    int forecast[16][12]{}, rootTurn = 0;
+    uint64_t mix(uint64_t x) {
+        x += 0x9e3779b97f4a7c15ULL;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        return x ^ (x >> 31);
+    }
+    void hashInit() {
+        if (!hashReady) {
+            for (int p = 0; p < SZ; p++) {
+                zcell[p] = mix(p + 1);
+                for (int k = 0; k < 12; k++)
+                    zhead[k][p] = mix(4096 + SZ * k + p);
+            }
+            for (int k = 0; k < 12; k++)
+                zt[k] = mix(50000 + k);
+            hashReady = true;
+        }
+        hash = 0;
+        for (int p = 0; p < SZ; p++)
+            if (wall[p])
+                hash ^= zcell[p];
+        for (int k = 0; k < N; k++)
+            if (live[k])
+                hash ^= zhead[k][pos[k]];
+        generation++;
+    }
+    int random(int n) {
+        rng ^= rng << 7;
+        rng ^= rng >> 9;
+        return int(rng % unsigned(n));
+    }
+    bool timeout() { return (++nodes % 16 == 0 && tron::budget_left() < stop) ? abort = true : abort; }
+    int degree(int p) const { return !wall[p - STR] + !wall[p + 1] + !wall[p + STR] + !wall[p - 1]; }
+    int priority(int k, int t) const { return (k - t % N + N) % N; }
+    void distances(int k) {
+        std::fill(dist[k], dist[k] + SZ, short(INF));
+        int b = 0, e = 0;
+        queue[e++] = pos[k];
+        dist[k][pos[k]] = 0;
+        while (b < e) {
+            int p = queue[b++], nd = dist[k][p] + 1;
+            for (int d : delta) {
+                int q = p + d;
+                if (!wall[q] && dist[k][q] == INF) {
+                    dist[k][q] = short(nd);
+                    queue[e++] = q;
+                }
+            }
+        }
+    }
+    struct Chamber {
+        double a, b, exit;
+    };
+    Chamber dfs(int p, int par, int who) {
+        tin[p] = low[p] = ++timer;
+        double weight = 1.0;
+        Chamber out{(p % STR + p / STR) % 2 == 0 ? weight : 0, (p % STR + p / STR) % 2 != 0 ? weight : 0,
+                    0};
+        for (int d : delta) {
+            int q = p + d;
+            if (owner[q] != who || q == par)
+                continue;
+            if (tin[q])
+                low[p] = std::min(low[p], tin[q]);
+            else {
+                auto c = dfs(q, p, who);
+                low[p] = std::min(low[p], low[q]);
+                if (low[q] >= tin[p])
+                    out.exit =
+                        std::max(out.exit, std::min(c.a + c.b, 2 * std::min(c.a, c.b) + 1) + c.exit);
+                else {
+                    out.a += c.a;
+                    out.b += c.b;
+                    out.exit = std::max(out.exit, c.exit);
+                }
+            }
+        }
+        return out;
+    }
+    // Multi-source geodesic Voronoi, then a rooted block-cut-tree capacity bound.
+    // Checkerboard counts account for the parity constraint on simple grid paths.
+    // Each attributed cell has a route back to the rider that won it.
+    void areas(double value[12], bool chambers = true) {
+        std::fill(owner, owner + SZ, -1);
+        std::fill(value, value + 12, 0.0);
+        int tail = 0, begin = 0, distNow = 0;
+        for (int k = 0; k < N; k++)
+            if (live[k]) {
+                int p = pos[k];
+                owner[p] = k;
+                closest[p] = 0;
+                queue[tail++] = p;
+            }
+        while (begin < tail) {
+            int end = tail;
+            ++distNow;
+            int start = (turn + distNow - 1) % N;
+            int rank[12];
+            for (int k = 0; k < N; k++)
+                rank[k] = (N + k - start) % N;
+            while (begin < end) {
+                int p = queue[begin++], mine = owner[p];
+                for (int off : delta) {
+                    int q = p + off;
+                    if (wall[q])
+                        continue;
+                    int other = owner[q];
+                    if (other < 0) {
+                        owner[q] = mine;
+                        closest[q] = short(distNow);
+                        queue[tail++] = q;
+                    } else if (closest[q] == distNow && rank[mine] < rank[other])
+                        owner[q] = mine;
+                }
+            }
+        }
+        for (int i = 0; i < tail; i++)
+            ++value[owner[queue[i]]];
+        for (int k = 0; k < N; k++)
+            if (live[k])
+                --value[k];
+        if (!chambers)
+            return;
+        std::fill(tin, tin + SZ, 0);
+        timer = 0;
+        for (int k = 0; k < N; k++)
+            if (live[k]) {
+                auto c = dfs(pos[k], -1, k);
+                double cap = std::min(c.a + c.b, 2 * std::min(c.a, c.b) + 1) + c.exit - 1;
+                value[k] = .93 * cap + .07 * value[k];
+            }
+    }
+
+    double evaluate() {
+        if ((++evals & 3) == 0 && tron::budget_left() < stop) {
+            abort = true;
+            return 0;
+        }
+        uint64_t key = hash ^ zt[turn % N];
+        auto &ce = ec[key & 32767];
+        if (ce.generation == generation && ce.key == key) {
+            separated = ce.sep;
+            return ce.value;
+        }
+        separated = false;
+        int alive = 0;
+        for (int k = 0; k < N; k++)
+            alive += live[k];
+        if (!live[me])
+            return alive ? (N == 2 ? -100000.0 : -100000.0 - 10000 * alive) + 10 * (turn - rootTurn) : 0;
+        if (alive == 1)
+            return 100000 - 10 * (turn - rootTurn);
+        double a[12];
+        areas(a);
+        double score = 0;
+        if (N == 2)
+            score = 10 * (a[me] - a[rival]);
+        else {
+            score = (N == 4 ? 1.1 : 1.5) * a[me];
+            for (int k = 0; k < N; k++)
+                if (k != me && live[k]) {
+                    double lead = a[me] - a[k];
+                    double spread = 12 + .13 * (a[me] + a[k]);
+                    score += 100.0 * lead / (spread + std::abs(lead));
+                }
+            score += 100 * (N - alive);
+        }
+        int deg = degree(pos[me]);
+        score += deg == 1 ? -3 : deg == 2 ? 0 : 1;
+        if (N == 2) {
+            int od = degree(pos[rival]);
+            score -= od == 1 ? -3 : od == 2 ? 0 : 1;
+        }
+        // A secured lead is worth more than the same amount of contested territory.
+        if (N == 2)
+            score = 90000.0 * std::tanh(score / (separated ? (60 + .3 * (a[me] + a[rival])) : 350.0));
+        ce = {key, score, generation, separated};
+        return score;
+    }
+    struct Change {
+        int old[12], dest[12], l[12];
+        uint64_t oldHash;
+    };
+    Change stepMoves(const int dirs[], bool cautious = false) {
+        Change c;
+        c.oldHash = hash;
+        for (int k = 0; k < N; k++) {
+            c.old[k] = pos[k];
+            c.l[k] = live[k];
+            c.dest[k] = dirs[k] >= 0 ? pos[k] + delta[dirs[k]] : pos[k];
+            if (live[k] && (dirs[k] < 0 || wall[c.dest[k]]))
+                live[k] = 0;
+        }
+        int valid[12];
+        std::copy(live, live + N, valid);
+        for (int k = 0; k < N; k++)
+            if (valid[k])
+                for (int j = 0; j < N; j++)
+                    if (j != k && valid[j] && c.dest[k] == c.dest[j] &&
+                        priority(j, turn) < priority(k, turn))
+                        live[k] = 0;
+        if (cautious && turn == rootTurn && live[me])
+            for (int k = 0; k < N; k++)
+                if (k != me && k != rival && c.l[k] && priority(k, turn) < priority(me, turn)) {
+                    int dif = std::abs(c.old[k] - c.dest[me]);
+                    if (dif == 1 || dif == STR) {
+                        live[me] = 0;
+                        break;
+                    }
+                }
+        for (int k = 0; k < N; k++) {
+            if (c.l[k])
+                hash ^= zhead[k][c.old[k]];
+            if (live[k]) {
+                pos[k] = c.dest[k];
+                wall[pos[k]] = 1;
+                hash ^= zhead[k][pos[k]] ^ zcell[pos[k]];
+            }
+        }
+        turn++;
+        return c;
+    }
+    Change move(int d, int e) {
+        int dirs[12];
+        for (int k = 0; k < N; k++) {
+            int z = forecast[std::min(15, turn - rootTurn)][k];
+            if (live[k] && (z < 0 || wall[pos[k] + delta[z]])) {
+                z = -1;
+                int best = -1;
+                for (int a = 0; a < 4; a++)
+                    if (!wall[pos[k] + delta[a]]) {
+                        int v = degree(pos[k] + delta[a]);
+                        if (v > best) {
+                            z = a;
+                            best = v;
+                        }
+                    }
+            }
+            dirs[k] = z;
+        }
+        dirs[me] = d;
+        if (rival >= 0)
+            dirs[rival] = e;
+        return stepMoves(dirs, true);
+    }
+    void undo(const Change &c) {
+        turn--;
+        hash = c.oldHash;
+        for (int k = 0; k < N; k++) {
+            if (live[k])
+                wall[pos[k]] = 0;
+            pos[k] = c.old[k];
+            live[k] = c.l[k];
+        }
+    }
+    void predict(const tron::State &s) {
+        for (int t = 0; t < 16; t++)
+            for (int k = 0; k < N; k++)
+                forecast[t][k] = s.last_dir[k];
+        if (N == 2)
+            return;
+        Change history[6];
+        int count = 0;
+        for (int t = 0; t < (N == 4 ? 3 : 4); t++) {
+            if (tron::budget_left() < stop + 29)
+                break;
+            int dirs[12];
+            for (int k = 0; k < N; k++) {
+                dirs[k] = -1;
+                if (!live[k])
+                    continue;
+                double best = -1e20;
+                for (int d = 0; d < 4; d++) {
+                    int q = pos[k] + delta[d];
+                    if (wall[q])
+                        continue;
+                    int old = pos[k];
+                    pos[k] = q;
+                    wall[q] = 1;
+                    double a[12];
+                    areas(a, false);
+                    double value = a[k] + .35 * degree(q) + (d == forecast[t][k] ? .04 : 0);
+                    for (int j = 0; j < N; j++)
+                        if (j != k && live[j] && priority(j, turn) < priority(k, turn)) {
+                            int gap = std::abs(pos[j] - q);
+                            if (gap == 1 || gap == STR)
+                                value -= 2000;
+                        }
+                    pos[k] = old;
+                    wall[q] = 0;
+                    if (value > best) {
+                        best = value;
+                        dirs[k] = d;
+                    }
+                }
+                forecast[t][k] = dirs[k];
+                for (int f = t + 1; f < 16; f++)
+                    forecast[f][k] = dirs[k];
+            }
+            history[count++] = stepMoves(dirs);
+        }
+        while (count)
+            undo(history[--count]);
+    }
+    int moves(int k, int a[4]) {
+        int n = 0;
+        if (k >= 0 && live[k])
+            for (int d = 0; d < 4; d++)
+                if (!wall[pos[k] + delta[d]])
+                    a[n++] = d;
+        if (!n)
+            a[n++] = -1;
+        return n;
+    }
+    double search(int depth, double alpha, double beta) {
+        struct RestoreRival {
+            int &value, old;
+            ~RestoreRival() { value = old; }
+        } restoreRival{rival, rival};
+        if (N > 2 && depth > 1) {
+            distances(me);
+            int nearest = INF, next = -1;
+            for (int k = 0; k < N; k++)
+                if (k != me && live[k]) {
+                    int d = INF;
+                    for (int dd : delta)
+                        d = std::min(d, int(dist[me][pos[k] + dd]) + 1);
+                    if (d < nearest) {
+                        nearest = d;
+                        next = k;
+                    }
+                }
+            int oldDist = INF;
+            if (rival >= 0 && live[rival])
+                for (int dd : delta)
+                    oldDist = std::min(oldDist, int(dist[me][pos[rival] + dd]) + 1);
+            if (N == 4 || nearest + 2 < oldDist || rival < 0 || !live[rival])
+                rival = next;
+        }
+        if (timeout())
+            return 0;
+        if (!depth || !live[me] || (rival >= 0 && !live[rival]))
+            return evaluate();
+        uint64_t key = hash ^ zt[turn % N] ^ mix(60000 + rival);
+        auto &te = tt[key & 32767];
+        double originalAlpha = alpha, originalBeta = beta;
+        if (te.generation == generation && te.key == key && te.depth >= depth) {
+            if (te.bound == 0)
+                return te.value;
+            if (te.bound == 1)
+                alpha = std::max(alpha, te.value);
+            else
+                beta = std::min(beta, te.value);
+            if (alpha >= beta)
+                return te.value;
+        }
+        double stand = evaluate();
+        if (abort)
+            return 0;
+        if (separated)
+            return stand;
+        int ma[4], oa[4], nm = moves(me, ma), no = moves(rival, oa);
+        double order[4][4], mv[4];
+        int oi[4][4];
+        for (int i = 0; i < nm; i++) {
+            mv[i] = 1e20;
+            for (int j = 0; j < no; j++) {
+                auto c = move(ma[i], oa[j]);
+                order[i][j] = evaluate();
+                undo(c);
+                if (abort)
+                    return 0;
+                oi[i][j] = j;
+                mv[i] = std::min(mv[i], order[i][j]);
+            }
+            std::sort(oi[i], oi[i] + no, [&](int a, int b) { return order[i][a] < order[i][b]; });
+        }
+        int mi[4] = {0, 1, 2, 3};
+        std::sort(mi, mi + nm, [&](int a, int b) { return mv[a] > mv[b]; });
+        if (depth == 1) {
+            return mv[mi[0]];
+        }
+        double best = -1e20;
+        for (int ii = 0; ii < nm; ii++) {
+            int i = mi[ii];
+            double worst = 1e20;
+            for (int jj = 0; jj < no; jj++) {
+                int j = oi[i][jj];
+                auto c = move(ma[i], oa[j]);
+                double v = search(depth - 1, std::max(alpha, best), std::min(beta, worst));
+                undo(c);
+                if (abort)
+                    return 0;
+                worst = std::min(worst, v);
+                if (worst <= std::max(alpha, best))
+                    break;
+            }
+            best = std::max(best, worst);
+            if (best >= beta)
+                break;
+        }
+        te = {key, best, generation, short(depth),
+              char(best <= originalAlpha  ? 2
+                   : best >= originalBeta ? 1
+                                          : 0)};
+        return best;
+    }
+    int duel(int last) {
+        int ma[4], oa[4], nm = moves(me, ma), no = moves(rival, oa);
+        if (nm == 1)
+            return std::max(0, ma[0]);
+        int answer = ma[0];
+        double scores[4], reply[4][4];
+        int order[4] = {0, 1, 2, 3}, oporder[4][4];
+        for (int i = 0; i < nm; i++) {
+            scores[i] = 1e20;
+            for (int j = 0; j < no; j++) {
+                auto c = move(ma[i], oa[j]);
+                reply[i][j] = evaluate();
+                scores[i] = std::min(scores[i], reply[i][j]);
+                undo(c);
+                oporder[i][j] = j;
+            }
+            if (ma[i] == last)
+                scores[i] += .001;
+            std::sort(oporder[i], oporder[i] + no,
+                      [&](int a, int b) { return reply[i][a] < reply[i][b]; });
+        }
+        std::sort(order, order + nm, [&](int a, int b) { return scores[a] > scores[b]; });
+        answer = ma[order[0]];
+        int maxdepth = N == 2 ? 12 : N == 4 ? 7 : 6;
+        for (int depth = 2; depth <= maxdepth; depth++) {
+            if (tron::budget_left() < stop + 2)
+                break;
+            double best = -1e20;
+            int bestmove = answer;
+            double next[4];
+            for (int ii = 0; ii < nm; ii++) {
+                int i = order[ii];
+                double worst = 1e20;
+                for (int jj = 0; jj < no; jj++) {
+                    int j = oporder[i][jj];
+                    auto c = move(ma[i], oa[j]);
+                    double v = search(depth - 1, best, worst);
+                    undo(c);
+                    if (abort)
+                        break;
+                    reply[i][j] = v;
+                    worst = std::min(worst, v);
+                    if (worst < best)
+                        break;
+                }
+                if (abort)
+                    break;
+                next[i] = worst;
+                if (worst > best) {
+                    best = worst;
+                    bestmove = ma[i];
+                }
+            }
+            if (abort)
+                break;
+            answer = bestmove;
+            std::copy(next, next + nm, scores);
+            std::sort(order, order + nm, [&](int a, int b) { return scores[a] > scores[b]; });
+            for (int i = 0; i < nm; i++)
+                std::sort(oporder[i], oporder[i] + no,
+                          [&](int a, int b) { return reply[i][a] < reply[i][b]; });
+            if (std::abs(best) > 90000)
+                break;
+        }
+        return answer;
+    }
+    // Rooted longest-path improvement: endpoint rotations, square insertions,
+    // randomized restarts, and preservation of the best valid path across turns.
+    // Insert an unvisited detour between two consecutive vertices of the path.
+    // Each unused component gets a spanning tree. The tree path between the
+    // two attachment cells becomes an ear, so every old path vertex is retained.
+    bool add_ear(std::vector<int> &path, const int index[]) {
+        int parent[SZ], depth[SZ], component[SZ], stack[SZ];
+        std::fill(parent, parent + SZ, -1);
+        const int offset = random(4);
+        for (int p = STR + 1; p < SZ - STR; p++) {
+            if (wall[p] || index[p] >= 0 || dist[me][p] >= INF || parent[p] >= 0)
+                continue;
+            int n = 0;
+            stack[n++] = p;
+            parent[p] = p;
+            depth[p] = 0;
+            component[p] = p;
+            while (n) {
+                int v = stack[--n];
+                for (int k = 0; k < 4; k++) {
+                    int z = v + delta[(offset + k) & 3];
+                    if (wall[z] || index[z] >= 0 || parent[z] >= 0)
+                        continue;
+                    parent[z] = v;
+                    depth[z] = depth[v] + 1;
+                    component[z] = p;
+                    stack[n++] = z;
+                }
+            }
+        }
+        int edge = -1, from = -1, to = -1, fork = -1, length = 0;
+        for (int i = 0; i + 1 < int(path.size()); i++) {
+            if ((i & 63) == 0 && tron::budget_left() < stop + 1)
+                break;
+            int a = path[i], b = path[i + 1];
+            for (int dx : delta) {
+                int u = a + dx;
+                if (parent[u] < 0)
+                    continue;
+                for (int dy : delta) {
+                    int v = b + dy;
+                    if (parent[v] < 0 || component[v] != component[u])
+                        continue;
+                    int x = u, y = v;
+                    while (depth[x] > depth[y])
+                        x = parent[x];
+                    while (depth[y] > depth[x])
+                        y = parent[y];
+                    while (x != y) {
+                        x = parent[x];
+                        y = parent[y];
+                    }
+                    int gain = depth[u] + depth[v] - 2 * depth[x] + 1;
+                    if (gain > length) {
+                        edge = i;
+                        length = gain;
+                        from = u;
+                        to = v;
+                        fork = x;
+                    }
+                }
+            }
+        }
+        if (edge < 0)
+            return false;
+        std::vector<int> trail, tail;
+        for (int v = from; v != fork; v = parent[v])
+            trail.push_back(v);
+        trail.push_back(fork);
+        for (int v = to; v != fork; v = parent[v])
+            tail.push_back(v);
+        trail.insert(trail.end(), tail.rbegin(), tail.rend());
+        path.insert(path.begin() + edge + 1, trail.begin(), trail.end());
+        return true;
+    }
+
+    // dist[k] must describe the current board. The grid is bipartite and a
+    // simple path can enter only one cut-off branch after its last articulation.
+    int reachable_bound(int k) {
+        int root = pos[k], counts[2] = {};
+        std::fill(owner, owner + SZ, -1);
+        for (int p = 0; p < SZ; ++p)
+            if (dist[k][p] < INF) {
+                ++counts[(p % STR + p / STR) & 1];
+                owner[p] = k;
+            }
+        const int color = (root % STR + root / STR) & 1;
+        const int parity = std::min(2 * counts[color], 2 * counts[1 - color] + 1);
+        std::fill(tin, tin + SZ, 0);
+        timer = 0;
+        auto block = dfs(root, -1, k);
+        int chambers = int(std::min(block.a + block.b, 2 * std::min(block.a, block.b) + 1) + block.exit);
+        return std::min(chambers, parity);
+    }
+    int isolated(int last) {
+        const int root = pos[me];
+        std::vector<int> best;
+        if (savedTurn == turn - 1 && saved.size() > 1 && saved[1] == root) {
+            best.assign(saved.begin() + 1, saved.end());
+            for (size_t i = 1; i < best.size(); i++)
+                if (wall[best[i]]) {
+                    best.resize(i);
+                    break;
+                }
+        }
+        if (best.empty())
+            best.push_back(root);
+        distances(me);
+        const int maxpossible = reachable_bound(me);
+        std::vector<int> path = best;
+        int index[SZ];
+        auto rebuild = [&]() {
+            std::fill(index, index + SZ, -1);
+            for (int i = 0; i < (int)path.size(); i++)
+                index[path[i]] = i;
+        };
+        rebuild();
+        for (int iter = 0; iter < 140000 && int(best.size()) < maxpossible; iter++) {
+            if ((iter & 255) == 0 && tron::budget_left() < stop)
+                break;
+            int p = path.back(), choice = -1, bestdeg = 100;
+            bool explore = random(5) == 0;
+            for (int z = 0, off = random(4); z < 4; z++) {
+                int q = p + delta[(z + off) & 3];
+                if (wall[q] || index[q] >= 0)
+                    continue;
+                int deg = 0;
+                for (int dd : delta)
+                    deg += !wall[q + dd] && index[q + dd] < 0;
+                int score = explore ? random(12) : (deg ? deg * 3 + random(4) : 30);
+                if (score < bestdeg) {
+                    bestdeg = score;
+                    choice = q;
+                }
+            }
+            if (choice >= 0) {
+                index[choice] = int(path.size());
+                path.push_back(choice);
+            } else {
+                int ro[4], nr = 0;
+                for (int d : delta) {
+                    int q = p + d, j = index[q];
+                    if (j >= 0 && j + 2 < (int)path.size())
+                        ro[nr++] = j;
+                }
+                if (nr) {
+                    int j = ro[random(nr)];
+                    std::reverse(path.begin() + j + 1, path.end());
+                    for (int i = j + 1; i < (int)path.size(); i++)
+                        index[path[i]] = i;
+                } else if (path.size() > 1) {
+                    int cut =
+                        std::max(1, int(path.size()) - 1 - random(std::min(12, int(path.size()) - 1)));
+                    while (int(path.size()) > cut) {
+                        index[path.back()] = -1;
+                        path.pop_back();
+                    }
+                }
+            }
+            if (path.size() > best.size())
+                best = path;
+            if (int(best.size()) >= maxpossible)
+                break;
+            if (iter % 256 == 255) {
+                for (int i = 0; i + 1 < (int)path.size(); i++) {
+                    int a = path[i], b = path[i + 1], diff = b - a, dirs[2];
+                    if (std::abs(diff) == 1) {
+                        dirs[0] = -STR;
+                        dirs[1] = STR;
+                    } else {
+                        dirs[0] = -1;
+                        dirs[1] = 1;
+                    }
+                    for (int d : dirs) {
+                        int u = a + d, v = b + d;
+                        if (!wall[u] && !wall[v] && index[u] < 0 && index[v] < 0) {
+                            path.insert(path.begin() + i + 1, {u, v});
+                            rebuild();
+                            i += 2;
+                            break;
                         }
                     }
                 }
-            }
-            priorityTurn = (priorityTurn + 1) % b.seats;
-        }
-    }
-
-    void cut(int p, int parent, int k, int root) {
-        order[p] = low[p] = short(++serial);
-        continuation[p] = 0;
-        stack[top++] = short(p);
-        int degree = 0;
-        for (int d : board.step) {
-            const int q = p + d;
-            if ((!board.open[q] && q != root) || owner[q] != k) continue;
-            ++degree;
-            if (q == parent) continue;
-            if (order[q]) {
-                low[p] = std::min(low[p], order[q]);
-                continue;
-            }
-            cut(q, p, k, root);
-            low[p] = std::min(low[p], low[q]);
-            if (low[q] < order[p]) continue;
-            int colors[2]{}, extension = 0, v;
-            do {
-                v = stack[--top];
-                colors[v&1] += weight[v];
-                extension = std::max(extension, int(continuation[v]));
-            } while (v != q);
-            int area = colors[0]+colors[1];
-            total[k] += area;
-            int cap = std::min(area, 2 * std::min(colors[0],colors[1]) + 4);
-            continuation[p] = short(std::max(int(continuation[p]), cap+extension));
-        }
-        links[k] += degree;
-        oneWay[k] += degree == 1;
-    }
-
-    int score(int a, int e) {
-        cut(a, 0, 0, a);
-        cut(e, 0, 1, e);
-        int strength[2];
-        for (int k = 0; k < 2; ++k) {
-            const int root = k == 0 ? a : e;
-            strength[k] = 9*continuation[root] + 2*total[k] + links[k] - 4*oneWay[k];
-        }
-        int edge = strength[0]-strength[1];
-        int denominator = 160 + (strength[0]+strength[1])/5;
-        int score = 520*edge / denominator;
-        if (!joined) {
-            score += 25;
-            if (score > 35) score += 270;
-            if (score < -35) score -= 270;
-        }
-        return score + 3*(board.degree(a)-board.degree(e));
-    }
-};
-
-std::uint64_t scramble(std::uint64_t x) {
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
-}
-
-struct CachedRace {
-    std::uint64_t key;
-    short value;
-    signed char depth, flag, own, enemy;
-};
-
-struct CachedField {
-    std::uint64_t key;
-    short value;
-    bool split;
-};
-
-struct Race {
-    Board& b;
-    int other, work = 0, nodes = 0, limit;
-    bool stopped = false;
-    static constexpr int cacheMask = 65535;
-    inline static std::array<CachedRace, cacheMask+1> games{};
-    inline static std::array<CachedField, cacheMask+1> fields{};
-    inline static std::uint64_t occupy[cells], selfHead[cells], enemyHead[cells];
-    inline static bool initialized = false;
-    std::uint64_t base = 0;
-    int answer = 0;
-
-    Race(Board& board, int opponent) : b(board), other(opponent) {
-        if (!initialized) {
-            for (int i = 0; i < cells; ++i) {
-                occupy[i] = scramble(1+i);
-                selfHead[i] = scramble(4096+i);
-                enemyHead[i] = scramble(8192+i);
-            }
-            initialized = true;
-        }
-        for (int p = 0; p < b.size; ++p) if (!b.open[p]) base ^= occupy[p];
-        base ^= scramble(16384 + 512*b.seats + 16*b.me + other);
-        limit = b.turn == 0 ? 36000 : 4800;
-    }
-
-    int estimated(int a, int e, int time, std::uint64_t key) {
-        auto& cached = fields[key & cacheMask];
-        if (cached.key == key) return cached.value;
-        DuelField board(b, a, e, other, time);
-        int value = board.score(a,e);
-        cached = {key, short(value), !board.joined};
-        if (++work >= limit) stopped = true;
-        return value;
-    }
-
-    void order(int p, int target, int hint, int result[4]) const {
-        int value[4];
-        const int stride = b.step[2];
-        for (int d=0; d<4; ++d) {
-            result[d]=d;
-            int q=p+b.step[d];
-            if (!b.open[q]) value[d] = -1000;
-            else {
-                int gap=std::abs(q/stride-target/stride)+std::abs(q%stride-target%stride);
-                value[d] = (d==hint ? 200 : 0) - 3*gap + std::min(2,b.degree(q));
-            }
-        }
-        for(int i=1;i<4;++i)
-            for(int j=i;j>0 && value[result[j]]>value[result[j-1]];--j)
-                std::swap(result[j],result[j-1]);
-    }
-
-    int search(int a, int e, int time, int depth, int alpha, int beta, std::uint64_t occupied, bool root) {
-        if ((++nodes & 63) == 0 && tron::budget_left() < 12) {
-            stopped = true;
-            return 0;
-        }
-        int na=b.degree(a), ne=b.degree(e);
-        if (!na || !ne) return na==ne ? 0 : na ? victory-time : time-victory;
-        std::uint64_t key=occupied^selfHead[a]^enemyHead[e]^scramble(24000+time);
-        if (!depth) return estimated(a,e,time,key);
-        auto& previous=games[key&cacheMask];
-        int hintA=-1, hintE=-1;
-        if(previous.key==key) {
-            hintA=previous.own; hintE=previous.enemy;
-            if(previous.depth>=depth) {
-                int saved=previous.value;
-                if(previous.flag==0 || (previous.flag==1 && saved>=beta) || (previous.flag==-1 && saved<=alpha)) {
-                    if(root) answer=hintA;
-                    return saved;
-                }
-            }
-        }
-        auto& leaf=fields[key&cacheMask];
-        if(!root && leaf.key==key && leaf.split) return leaf.value;
-        int first[4], second[4]; order(a,e,hintA,first); order(e,a,hintE,second);
-        int best=-victory-1,bestA=first[0],bestE=second[0];
-        const int initialAlpha=alpha;
-        for(int da:first) {
-            const int x=a+b.step[da];
-            if(!b.open[x]) continue;
-            int worst=victory+1, reply=second[0];
-            for(int de:second) {
-                const int y=e+b.step[de];
-                if(!b.open[y]) continue;
-                int outcome;
-                if(x==y) outcome=b.priority(b.me,time)<b.priority(other,time) ? victory-time : time-victory;
-                else {
-                    b.open[x]=b.open[y]=false;
-                    outcome=search(x,y,time+1,depth-1,std::max(alpha,best),std::min(beta,worst),occupied^occupy[x]^occupy[y],false);
-                    b.open[x]=b.open[y]=true;
-                    if(stopped) return 0;
-                }
-                if(outcome<worst) { worst=outcome; reply=de; }
-                if(worst<=std::max(alpha,best)) break;
-            }
-            if(worst>best) {
-                best=worst; bestA=da; bestE=reply;
-                if(best>=beta) break;
-            }
-        }
-        signed char flag = best<=initialAlpha ? -1 : best>=beta ? 1 : 0;
-        previous={key,short(best),(signed char)depth,flag,(signed char)bestA,(signed char)bestE};
-        if(root) answer=bestA;
-        return best;
-    }
-
-    int move() {
-        int choice=0;
-        for(int depth=1; depth<=13; ++depth) {
-            int value=search(b.heads[b.me],b.heads[other],b.turn,depth,-victory-1,victory+1,base,true);
-            if(stopped) break;
-            choice=answer;
-            if(std::abs(value)>victory-2000 || tron::budget_left()<17) break;
-        }
-        return choice;
-    }
-};
-
-constexpr int forecastSteps = 6;
-using Heads = std::array<int, tron::MAXN>;
-using Directions = std::array<int, tron::MAXN>;
-using Preferences = std::array<std::array<int, 4>, tron::MAXN>;
-
-struct Territory {
-    const Board& b;
-    short tick[cells], queue[cells], disc[cells], low[cells], stack[cells], downstream[cells];
-    signed char owner[cells], mass[cells];
-    int length[tron::MAXN]{}, reach[tron::MAXN]{}, fringe[tron::MAXN]{};
-    int serial=0, top=0;
-
-    explicit Territory(const Board& board) : b(board) {
-        std::fill_n(tick,b.size,short(-1));
-        std::fill_n(disc,b.size,short(0));
-        int head=0, tail=0;
-        for(int k=0;k<b.seats;++k) if(b.heads[k]) {
-            int p=b.heads[k];
-            queue[tail++]=short(p); tick[p]=0; owner[p]=(signed char)k; mass[p]=0;
-        }
-        int priority=b.turn%b.seats;
-        for(int depth=1;head<tail;++depth) {
-            int end=tail;
-            for(;head<end;++head) {
-                const int p=queue[head], k=owner[p];
-                for(int offset:b.step) {
-                    const int q=p+offset;
-                    if(!b.open[q]) continue;
-                    if(tick[q]<0) {
-                        queue[tail++]=short(q); tick[q]=short(depth);
-                        owner[q]=(signed char)k; mass[q]=4;
-                    } else if(tick[q]==depth && k!=owner[q]) {
-                        int incumbent=owner[q];
-                        int ourPriority=k>=priority?k-priority:k+b.seats-priority;
-                        int theirPriority=incumbent>=priority?incumbent-priority:incumbent+b.seats-priority;
-                        if(ourPriority<theirPriority) owner[q]=(signed char)k;
-                        mass[q]=3;
+                if (path.size() > best.size())
+                    best = path;
+                if (N == 2 && iter % 2048 == 2047) {
+                    path.assign(1, root);
+                    rebuild();
+                } else if (N > 2 && iter % 1024 == 1023) {
+                    path = best;
+                    rebuild();
+                    if (add_ear(path, index)) {
+                        best = path;
+                        rebuild();
+                    } else if (iter % 2048 == 2047) {
+                        path.assign(1, root);
+                        rebuild();
                     }
+                } else if (random(4) == 0) {
+                    path = best;
+                    int cut =
+                        std::max(1, int(path.size()) - 1 - random(std::max(1, int(path.size()) / 2)));
+                    path.resize(cut);
+                    rebuild();
                 }
             }
-            if(++priority==b.seats) priority=0;
         }
-        for(int k=0;k<b.seats;++k) if(b.heads[k]) {
-            visit(b.heads[k],0,k);
-            length[k]=downstream[b.heads[k]];
-        }
+        saved = best;
+        savedTurn = turn;
+        if (best.size() > 1)
+            for (int d = 0; d < 4; d++)
+                if (root + delta[d] == best[1])
+                    return d;
+        for (int d = 0; d < 4; d++)
+            if (!wall[root + delta[d]])
+                return d;
+        return last;
     }
-
-    void visit(int p,int parent,int k) {
-        disc[p]=low[p]=short(++serial);
-        stack[top++]=short(p); downstream[p]=0;
-        int ownNeighbors=0;
-        for(int offset:b.step) {
-            int q=p+offset;
-            if(!b.open[q] && q!=b.heads[k]) continue;
-            if(owner[q]!=k) continue;
-            ++ownNeighbors;
-            if(q==parent) continue;
-            if(disc[q]) { low[p]=std::min(low[p],disc[q]); continue; }
-            visit(q,p,k);
-            low[p]=std::min(low[p],low[q]);
-            if(low[q]<disc[p]) continue;
-            int colors[2]{},extension=0,v;
-            do {
-                v=stack[--top];
-                colors[v&1]+=mass[v];
-                extension=std::max(extension,int(downstream[v]));
-            } while(v!=q);
-            const int area=colors[0]+colors[1];
-            reach[k]+=area;
-            const int space=std::min(area,2*std::min(colors[0],colors[1])+4);
-            downstream[p]=short(std::max(int(downstream[p]),space+extension));
+    // Before accepting a partition, try to certify it with an actual survival
+    // path longer than every cell the opponent could possibly still consume.
+    int securePartition() {
+        int root = pos[me], enemy = rival;
+        for (int d = 0; d < 4; d++) {
+            int q = root + delta[d];
+            if (wall[q])
+                continue;
+            int gap = std::abs(q - pos[enemy]);
+            if ((gap == 1 || gap == STR) && priority(enemy, turn) < priority(me, turn))
+                continue;
+            pos[me] = q;
+            wall[q] = 1;
+            turn++;
+            distances(me);
+            bool separate = true;
+            for (int dd : delta)
+                if (dist[me][pos[enemy] + dd] < INF)
+                    separate = false;
+            if (separate) {
+                int mine = 0, theirs = 0;
+                bool certify = false;
+                if (N == 2) {
+                    for (int p = 0; p < SZ; p++)
+                        mine += dist[me][p] < INF;
+                    distances(enemy);
+                    for (int p = 0; p < SZ; p++)
+                        theirs += dist[enemy][p] < INF;
+                    certify = mine > theirs * 1.12 + 4 && tron::budget_left() > stop + 16;
+                } else {
+                    mine = reachable_bound(me);
+                    distances(enemy);
+                    theirs = reachable_bound(enemy);
+                    certify = mine > theirs && tron::budget_left() > stop + 15;
+                }
+                if (certify) {
+                    double oldstop = stop;
+                    stop = std::max(stop, tron::budget_left() - 6.0);
+                    saved.clear();
+                    savedTurn = -1;
+                    isolated(d);
+                    stop = oldstop;
+                    if (int(saved.size()) > theirs + (N == 2 ? 1 : 0)) {
+                        saved.insert(saved.begin(), root);
+                        turn--;
+                        savedTurn = turn;
+                        pos[me] = root;
+                        wall[q] = 0;
+                        return d;
+                    }
+                    saved.clear();
+                    savedTurn = -1;
+                }
+            }
+            turn--;
+            pos[me] = root;
+            wall[q] = 0;
         }
-        fringe[k]+=ownNeighbors<=1;
+        return -1;
     }
-
-    int lifespan(int k) const {
-        if(!b.heads[k]) return 0;
-        return (8*length[k]+2*reach[k])/40 - fringe[k]/5;
-    }
-
-    int score(int rival) const {
-        int me=b.me;
-        const int ours=lifespan(me);
-        int points=0;
-        for(int k=0;k<b.seats;++k) if(k!=me) {
-            if(!b.heads[k]) {points+=200;continue;}
-            int theirs=lifespan(k);
-            int gap=ours-theirs;
-            points+=100+100*gap/(std::abs(gap)+12+(ours+theirs)/8);
+    int decide(const tron::State &s) {
+        W = s.W;
+        H = s.H;
+        N = s.N;
+        me = s.me;
+        turn = s.turn;
+        rootTurn = turn;
+        stop = turn == 0 ? 1650 : 8;
+        nodes = evals = 0;
+        abort = false;
+        std::fill(wall, wall + SZ, 1);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                wall[(y + 1) * STR + x + 1] = s.cell[y][x] != tron::EMPTY;
+        for (int k = 0; k < N; k++) {
+            pos[k] = (s.y[k] + 1) * STR + s.x[k] + 1;
+            live[k] = s.alive[k];
         }
-        return 3*std::min(ours,400)+(8*points)/(b.seats-1)
-               -std::min(lifespan(rival),250)/2+2*b.degree(b.heads[me]);
+        hashInit();
+        if (!turn) {
+            saved.clear();
+            savedTurn = -1;
+            rng ^= pos[me] * 1234567ULL + N * 37;
+        }
+        distances(me);
+        rival = -1;
+        int nearest = INF;
+        for (int k = 0; k < N; k++)
+            if (k != me && live[k]) {
+                int d = INF;
+                for (int dd : delta)
+                    d = std::min(d, int(dist[me][pos[k] + dd]) + 1);
+                if (d < nearest) {
+                    nearest = d;
+                    rival = k;
+                }
+            }
+        if (rival < 0)
+            return isolated(s.last_dir[me]);
+        int survivors = 0;
+        for (int k = 0; k < N; k++)
+            survivors += live[k];
+        if (survivors == 2) {
+            int secure = securePartition();
+            if (secure >= 0)
+                return secure;
+            return tactics::pursue(s, rival);
+        }
+        predict(s);
+        saved.clear();
+        savedTurn = -1;
+        return duel(s.last_dir[me]);
     }
 };
-
-struct Crowd {
-    Board& b;
-    int rival=-1, gap=inf, maxDepth=0, work=0, ceiling, answer=0;
-    bool stopped=false;
-    Preferences prediction[forecastSteps]{};
-
-    explicit Crowd(Board& board) : b(board), ceiling(board.seats>4?400:900) {
-        int self=b.heads[b.me];
-        Distances walk;
-        distances(b,&self,1,walk);
-        for(int k=0;k<b.seats;++k) if(k!=b.me && b.heads[k]) {
-            int distance=passage(b,walk,b.heads[k]);
-            if(distance<gap) {gap=distance;rival=k;}
-        }
-        if(b.turn==0) ceiling*=4;
-    }
-
-    Preferences forecasts() const {
-        Preferences order{};
-        for(int k=0;k<b.seats;++k) {
-            int p=b.heads[k];
-            for(int d=0;d<4;++d) order[k][d]=d;
-            if(!p) continue;
-            Distances enemy, ours; rivals(b,k,enemy);
-            int value[4];
-            for(int d=0;d<4;++d) {
-                int q=p+b.step[d];
-                if(!b.open[q]) {value[d]=-100000; continue;}
-                distances(b,&q,1,ours);
-                int score=0;
-                for(int j=0;j<b.size;++j) if(ours[j]<inf) {
-                    if(ours[j]+1<enemy[j]) score+=4;
-                    else if(ours[j]<=enemy[j]) score+=2;
-                }
-                score+=3*b.degree(q);
-                if(!b.degree(q)) score-=120;
-                if(enemy[q]==1)
-                    for(int i=0;i<b.seats;++i)
-                        if(i!=k && b.heads[i] && b.priority(i,b.turn)<b.priority(k,b.turn))
-                            for(int off:b.step) if(b.heads[i]+off==q) score-=350;
-                value[d]=score;
-            }
-            for(int i=1;i<4;++i)
-                for(int j=i;j>0 && value[order[k][j]]>value[order[k][j-1]];--j)
-                    std::swap(order[k][j],order[k][j-1]);
-        }
-        return order;
-    }
-
-    Directions probable(const Preferences& order) const {
-        Directions result{};
-        for(int k=0;k<b.seats;++k) if(b.heads[k])
-            for(int d:order[k]) if(b.open[b.heads[k]+b.step[d]]) {result[k]=d;break;}
-        return result;
-    }
-
-    Heads advance(const Directions& plan) {
-        Heads next{};
-        int i=b.turn%b.seats;
-        for(int n=0;n<b.seats;++n) {
-            if(b.heads[i]) {
-                int q=b.heads[i]+b.step[plan[i]];
-                if(b.open[q]) {b.open[q]=false;next[i]=q;}
-            }
-            if(++i==b.seats) i=0;
-        }
-        return next;
-    }
-
-    void undo(const Heads& next) {
-        for(int p:next) if(p) b.open[p]=true;
-    }
-
-    int estimate() {
-        ++work;
-        if(work>=ceiling || ((work&7)==0 && tron::budget_left()<12)) stopped=true;
-        return Territory(b).score(rival);
-    }
-
-    int search(int ply,int alpha,int beta) {
-        int me=b.me,p=b.heads[me];
-        if(!p || !b.degree(p)) return -8000+100*ply;
-        if(ply==maxDepth) return estimate();
-        const Heads before=b.heads;
-        const Preferences& order=prediction[ply];
-        Directions directions=probable(order);
-        const int enemy=b.heads[rival], enemyDegree=enemy?b.degree(enemy):0;
-        int best=-20000;
-        for(int da:order[me]) {
-            int q=p+b.step[da];
-            if(!b.open[q]) continue;
-            int danger=0;
-            for(int k=0;k<b.seats;++k) if(k!=me && k!=rival && before[k]
-                        && b.priority(k,b.turn)<b.priority(me,b.turn)) {
-                for(int off:b.step) if(before[k]+off==q) danger=ply==0?5000:(ply==1?550:70);
-            }
-            directions[me]=da;
-            int worst=10000;
-            for(int de:order[rival]) {
-                if(enemyDegree && !b.open[enemy+b.step[de]]) continue;
-                directions[rival]=de;
-                Heads after=advance(directions);
-                b.heads=after; ++b.turn;
-                int score;
-                if(!after[me]) score=-8500+100*ply;
-                else {
-                    int alive=0;
-                    for(int z:after) alive+=z!=0;
-                    score=alive==1?8000-ply:search(ply+1,std::max(alpha,best)+danger,std::min(beta,worst)+danger);
-                }
-                --b.turn; b.heads=before; undo(after);
-                if(stopped) return 0;
-                score-=danger;
-                worst=std::min(worst,score);
-                if(!enemyDegree || worst<=std::max(alpha,best)) break;
-                if(gap>12 && ply>0) break;
-            }
-            if(worst>best) {best=worst;if(!ply) answer=da;}
-            if(best>=beta) break;
-        }
-        return best;
-    }
-
-    int move() {
-        Heads saved[forecastSteps+1]; saved[0]=b.heads;
-        for(int i=0;i<forecastSteps;++i) {
-            prediction[i]=forecasts();
-            saved[i+1]=advance(probable(prediction[i]));b.heads=saved[i+1];++b.turn;
-        }
-        for(int i=forecastSteps;i>0;--i) {undo(saved[i]);--b.turn;}
-        b.heads=saved[0];
-        int chosen=prediction[0][b.me][0];
-        if(rival<0) return chosen;
-        for(maxDepth=1;maxDepth<=forecastSteps;++maxDepth) {
-            search(0,-20000,20000);
-            if(stopped) break;
-            chosen=answer;
-            if(tron::budget_left()<16) break;
-        }
-        return chosen;
-    }
-};
-
-struct PathPlanner {
-    Board& board;
-    const int start, bound;
-    std::uint32_t rng;
-    std::vector<int> path, best;
-    short index[cells], queue[cells];
-    unsigned short visited[cells]{}, stamp=0;
-    int nodes=0;
-
-    PathPlanner(Board& b,const std::vector<int>& previous,int upper)
-        : board(b),start(b.heads[b.me]),bound(upper),rng(0xc2b2ae35u+239u*start+17351u*b.turn) {
-        auto found=std::find(previous.begin(),previous.end(),start);
-        best.push_back(start);
-        if(found!=previous.end()) {
-            for(++found;found!=previous.end() && board.open[*found];++found) best.push_back(*found);
-        }
-        best.reserve(board.size);path.reserve(board.size);
-    }
-
-    unsigned random() {
-        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;return rng;
-    }
-
-    bool unused(int p) const { return board.open[p] && index[p]<0; }
-    int exits(int p) const {
-        int count=0;
-        for(int offset:board.step) count+=unused(p+offset);
-        return count;
-    }
-    void record() { if(path.size()>best.size()) best=path; }
-
-    void reset(int attempt) {
-        int keep=1;
-        int length=int(best.size());
-        if(length>1 && attempt%5!=3) {
-            if(attempt%5==0) keep=length;
-            else if(attempt%5==1) keep=1+random()%length;
-            else keep=std::max(1,length-int(random()%std::max(3,length/4))-1);
-        }
-        path.assign(best.begin(),best.begin()+keep);
-        std::fill_n(index,board.size,short(-1));
-        for(int i=0;i<keep;++i) index[path[i]]=short(i);
-    }
-
-    int component(int first,int colors[]) {
-        int front=0,tail=1;
-        queue[0]=short(first);visited[first]=stamp;
-        while(front<tail) {
-            int p=queue[front++];++colors[p&1];
-            for(int offset:board.step) {
-                int q=p+offset;
-                if(unused(q) && visited[q]!=stamp) {
-                    visited[q]=stamp;queue[tail++]=short(q);
-                }
-            }
-        }
-        return tail;
-    }
-
-    void fresh() {
-        if(++stamp==0) {
-            std::fill_n(visited,board.size,0);++stamp;
-        }
-    }
-
-    // When a trail seals a neck, the next step commits it to one of the components.
-    int choices(int p,int dirs[],int sizes[]) {
-        int count=0, mask=0;
-        for(int d=0;d<4;++d) if(unused(p+board.step[d])) {
-            dirs[count++]=d;mask|=1<<d;
-        }
-        std::fill_n(sizes,4,0);
-        if(count<=1) return count;
-        int unions=0;
-        for(int d=0;d<4;++d) {
-            int n=(d+1)&3;
-            if((mask&(1<<d)) && (mask&(1<<n)) && unused(p+board.step[d]+board.step[n])) ++unions;
-        }
-        if(unions>=count-1) return count;
-        bool assigned[4]{};
-        for(int i=0;i<count;++i) {
-            if(assigned[i]) continue;
-            fresh();int colors[2]{};
-            int size=component(p+board.step[dirs[i]],colors);
-            for(int j=i;j<count;++j) if(visited[p+board.step[dirs[j]]]==stamp) {
-                assigned[j]=true;
-                sizes[dirs[j]]=std::min(size,2*std::min(colors[0],colors[1])+1);
-            }
-        }
-        return count;
-    }
-
-    bool extend() {
-        int dirs[4],sizes[4],p=path.back();
-        int n=choices(p,dirs,sizes);
-        if(n==0) return false;
-        int picked=dirs[0], top=-10000;
-        if(n>1) for(int i=0;i<n;++i) {
-            int d=dirs[i],q=p+board.step[d],degree=exits(q);
-            int score=64*sizes[d]-(degree?degree*16:70)+int(random()%26);
-            if(score>top) {picked=d;top=score;}
-        }
-        int q=p+board.step[picked];
-        index[q]=short(path.size());path.push_back(q);return true;
-    }
-
-    void reverse(int from,int to) {
-        std::reverse(path.begin()+from,path.begin()+to+1);
-        for(int i=from;i<=to;++i) index[path[i]]=short(i);
-    }
-
-    bool rotateEnd() {
-        int last=int(path.size())-1, pivot=-1, value=-1;
-        for(int offset:board.step) {
-            int i=index[path.back()+offset];
-            if(i<0 || i>=last-1) continue;
-            int score=(exits(path[i+1])?20:0)+int(random()%11);
-            if(score>value) {pivot=i;value=score;}
-        }
-        if(pivot<0) return false;
-        reverse(pivot+1,last);return true;
-    }
-
-    bool growSideways() {
-        int n=int(path.size());
-        if(n<2) return false;
-        for(int j=0, i=1+random()%(n-1);j<n-1;++j) {
-            if(i==n) i=1;
-            int a=path[i-1],c=path[i];
-            int side=std::abs(a-c)==1?board.step[2]:1;
-            for(int offset:{side,-side}) if(unused(a+offset) && unused(c+offset)) {
-                path.insert(path.begin()+i,{a+offset,c+offset});
-                for(int k=i;k<int(path.size());++k) index[path[k]]=short(k);
-                return true;
-            }
-            ++i;
-        }
-        return false;
-    }
-
-    // An internal plaquette can either move a corner or reverse a strip of the path.
-    // Both operations keep the endpoints and the number of visited cells.
-    bool rearrange() {
-        int n=int(path.size());
-        if(n<4) return false;
-        for(int k=0;k<12;++k) {
-            int i=1+random()%(n-2);
-            int a=path[i-1],p=path[i],c=path[i+1];
-            if(std::abs(a-p)!=std::abs(c-p)) {
-                int q=a+c-p;
-                if(unused(q)) {
-                    index[p]=-1;index[q]=short(i);path[i]=q;
-                    return true;
-                }
-            }
-            int off=std::abs(c-p)==1?board.step[2]:1;
-            if(random()&1) off=-off;
-            int j=index[p+off];
-            if(j>i+1 && j+1<n && path[j+1]==c+off) {reverse(i+1,j);return true;}
-            if(j>=0 && j<i-1 && path[j+1]==c+off) {reverse(j+1,i);return true;}
-        }
-        return false;
-    }
-
-    void exact() {
-        record();
-        if(int(best.size())>bound || ++nodes>22000) return;
-        if((nodes&255)==0 && tron::budget_left()<14) {nodes=22001;return;}
-        int p=path.back(),dirs[4],sizes[4],n=choices(p,dirs,sizes);
-        if(n>=2 && (path.size()&1)==0) {
-            fresh();int colors[2]{},count=0;
-            for(int i=0;i<n;++i) {
-                int q=p+board.step[dirs[i]];
-                if(visited[q]!=stamp) count+=component(q,colors);
-            }
-            int upper=std::min(count,2*std::min(colors[0],colors[1])+1);
-            if(int(path.size())+upper<=int(best.size())) return;
-        }
-        for(int i=0;i<n;++i) {
-            int q=p+board.step[dirs[i]];
-            if(sizes[dirs[i]] && int(path.size())+sizes[dirs[i]]<=int(best.size())) continue;
-            index[q]=short(path.size());path.push_back(q);exact();path.pop_back();index[q]=-1;
-            if(nodes>22000 || int(best.size())>bound) return;
-        }
-    }
-
-    int move(std::vector<int>& previous) {
-        for(int attempt=0;attempt<80 && int(best.size())<=bound;++attempt) {
-            if(attempt && tron::budget_left()<19) break;
-            reset(attempt);
-            int stale=0,lastLength=int(path.size());
-            for(int iter=0;iter<400 && stale<42;++iter) {
-                if((iter&15)==0 && tron::budget_left()<17) break;
-                while(extend()) {}
-                record();
-                if(int(best.size())>bound) break;
-                if(int(path.size())!=lastLength) {stale=0;lastLength=int(path.size());}
-                if(stale%6==0 && growSideways()) continue;
-                bool moved=(stale%3!=2 && rotateEnd());
-                if(!moved) moved=rearrange();
-                ++stale;
-                if(!moved && stale>=8) break;
-            }
-        }
-        if(bound<=53 && int(best.size())<=bound && tron::budget_left()>16) {
-            reset(3);
-            exact();
-        }
-        previous=best;
-        if(best.size()>=2)
-            for(int d=0;d<4;++d) if(start+board.step[d]==best[1]) return d;
-        for(int d=0;d<4;++d) if(board.open[start+board.step[d]]) return d;
-        return 0;
-    }
-};
-
-}  // namespace
-
-int decide(const tron::State& s) {
-    static std::vector<int> route;
-    if (s.turn == 0) route.clear();
-    Board board(s);
-    const int head = board.heads[s.me];
-    if (board.degree(head) <= 1) {
-        for (int d = 0; d < 4; ++d) if (board.open[head + board.step[d]]) return d;
-        return s.last_dir[s.me];
-    }
-    Distances reachable, empty;
-    distances(board, &head, 1, reachable);
-    int opponent = -1, count = 0;
-    for (int k = 0; k < s.N; ++k) {
-        if (k == s.me || !board.heads[k]) continue;
-        if (passage(board, reachable, board.heads[k]) < inf) {
-            ++count;
-            opponent = k;
-        }
-    }
-    if (!count) {
-        Chambers room(board, reachable, empty, true);
-        int upper = room.value(head) / 4;
-        return PathPlanner(board, route, upper).move(route);
-    }
-    route.clear();
-    if (count == 1 && tron::alive_count(s) == 2) return Race(board, opponent).move();
-    return Crowd(board).move();
+} // namespace
+int decide(const tron::State &s) {
+    static Bot bot;
+    return bot.decide(s);
 }

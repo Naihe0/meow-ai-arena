@@ -28,7 +28,7 @@ jobs:
           & $compiler --version
       - name: Evaluate the verified source
         shell: pwsh
-        run: python .github/scripts/finals_candidate.py tron ${{ matrix.kind }} 2df8f0bf18d5cfa64cfc511e562c9bfd77cfff847bca5b347ea273fec55e0aa3
+        run: python .github/scripts/finals_candidate.py tron ${{ matrix.kind }} 972f76a0d8f47c39aa202f482ad29d288634e60fdb507ad163da80330205f181
       - name: Save match results
         if: always()
         uses: actions/upload-artifact@v4

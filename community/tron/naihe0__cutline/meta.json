@@ -2,10 +2,10 @@
   "author": "Naihe0",
   "github": "Naihe0",
   "name": "折线",
-  "description": "争地时按障碍和割点估算可用空间，单挑搜索双方走法，多人局预测车流。分隔后通过路径旋转与插入延长生存路线。",
+  "description": "双人局搜索双方同时落子后的可走地盘，多人局预测其他车手的封路路线，分区后保存并持续延长一条实际可行的路径。",
   "written_by": "ai",
   "model": "GPT-6.2 Astra",
-  "tool": "Codex",
-  "based_on": "",
+  "tool": "Codex (max reasoning)",
+  "based_on": "tron/sparring/sparring_hard.cpp; tron/bots/reference/gpt-6-astra-ultra-fast.cpp",
   "license": "MIT"
 }
