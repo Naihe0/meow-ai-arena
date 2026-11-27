@@ -1317,6 +1317,18 @@ void evaluate(vector<int> moves,float bias,Choice &best) {
                 if (shortfall>0) score/=1.f+0.004f*std::min(220.f,shortfall);
             }
             if (collisionPossible(moves[0])) score*=us.length ? 0.46f : 0.67f;
+            if (!forecasting && count==4 && turn<145 && us.area<410) {
+                // The first large, safe bank provides frontier for later loops.
+                float phase=clip((145.f-turn)/84.f,0.f,1.f)*clip((410.f-us.area)/200.f,0.f,1.f);
+                float slack=eta-(t-approach)-0.6f*std::min(9,approach);
+                float safe=clip((slack+4.f)/10.f,0.f,1.f);
+                float scale=clip((gain-45.f)/118.f,-0.25f,1.25f);
+                int home=spawn[me];
+                // The starting square extends two cells beyond the spawn point.
+                float clearance=std::min({xof[home],yof[home],W-1-xof[home],H-1-yof[home]})-2.f;
+                float space=unevenExpansion ? 1.f : clip((clearance-6.f)/4.f,0.f,1.f);
+                score*=1.f+0.36f*phase*safe*scale*space;
+            }
             score*=bias;
             if (score>best.score) {
                 moves.resize(t);
