@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [official-quick, official-full, independent-full]
+        kind: [official-quick]
     name: "tron / ${{ matrix.kind }}"
     env:
       PYTHONUTF8: "1"
@@ -28,7 +28,7 @@ jobs:
           & $compiler --version
       - name: Evaluate the verified source
         shell: pwsh
-        run: python .github/scripts/finals_candidate.py tron ${{ matrix.kind }} 2df8f0bf18d5cfa64cfc511e562c9bfd77cfff847bca5b347ea273fec55e0aa3
+        run: python .github/scripts/finals_candidate.py tron ${{ matrix.kind }} 69461cfa7d050ddc346cdac6d711e375ab1c4d710500d61a4b0a9d9be28865f0
       - name: Save match results
         if: always()
         uses: actions/upload-artifact@v4

@@ -4,7 +4,39 @@ import hashlib
 import importlib.util
 import json
 import os
+import random
+import secrets
 import sys
+
+def direct_schedule(episode, challenge, seed):
+    rng = random.Random(seed)
+    games = []
+    def rotate(mode, game_map, game_seed, opponents, offsets):
+        seats = ["me", *rng.sample(list(opponents), len(opponents))]
+        for offset in offsets:
+            games.append((mode, game_map, game_seed, seats[offset:] + seats[:offset]))
+    if episode == "tron":
+        focus = ["AstraUF", "sparring_hard", "Mistral", "DSNew"]
+        for i in range(32):
+            for opponent in focus:
+                rotate("1v1", 2, seed+i, [opponent], range(2))
+        for i in range(40):
+            rivals = [name for index, name in enumerate(focus) if index != i % 4]
+            rotate("3-4", 4, seed+100+i, rivals, range(4))
+        others = [name for name in challenge.OPPONENTS if name not in focus]
+        for i in range(24):
+            rivals = focus + rng.sample(others, 7)
+            rotate("12", 12, seed+300+i, rivals, [i%3+3*k for k in range(4)])
+    else:
+        focus = ["astra", "fable", "opus"]
+        others = [name for name in challenge.OPPONENTS if name != "astra"]
+        for mid, game_map in enumerate(challenge.MAPS):
+            for i in range(12):
+                for opponent in focus:
+                    rotate("duel", game_map, seed+15*mid+i, [opponent], range(2))
+                rivals = focus if i % 2 == 0 else ["astra", *rng.sample(others, 2)]
+                rotate("ffa", game_map, seed+500+15*mid+i, rivals, range(4))
+    return focus, games
 
 def per_game_evidence(challenge, games, records, official, episode, destination):
     expected = {row["name"]: row["tally"] for row in official["opponents"]}
@@ -29,7 +61,7 @@ def per_game_evidence(challenge, games, records, official, episode, destination)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("episode", choices=["tron", "boomerang"])
-parser.add_argument("kind", choices=["official-quick", "official-full", "independent-full"])
+parser.add_argument("kind", choices=["official-quick", "official-full", "independent-full", "direct-panel"])
 parser.add_argument("expected_sha")
 options = parser.parse_args()
 root = Path.cwd()
@@ -58,18 +90,35 @@ else:
     spec.loader.exec_module(challenge)
     # Keep the official game engine, budget, map pool, seat rotation, and rating fit.
     # This separate schedule is only a reproducibility check and is never submitted for ranking.
-    challenge.SEED = {"tron": 694391, "boomerang": 371527}[episode]
+    panel = options.kind == "direct-panel"
+    challenge.SEED = 1000000+secrets.randbelow(800000000) if panel else {"tron": 694391, "boomerang": 371527}[episode]
+    raw_dir = destination
+    if panel:
+        focus, fixtures = direct_schedule(episode, challenge, challenge.SEED)
+        challenge.schedule = lambda *args: fixtures
+        destination.mkdir()
+        raw_dir = destination / "native-panel"
     original_result = challenge.make_result
     def record_result(games, records, *args, **kwargs):
         measured = original_result(games, records, *args, **kwargs)
         per_game_evidence(challenge, games, records, measured, episode, destination)
         return measured
     challenge.make_result = record_result
-    sys.argv = ["challenge.py", str(source), "--full", "--out", str(destination)]
+    sys.argv = ["challenge.py", str(source), "--full", "--out", str(raw_dir)]
     if episode == "tron":
         sys.argv += ["--require-cpu"]
     challenge.main()
-    detail = json.loads((destination / "result.json").read_bytes())
+    detail = json.loads((raw_dir / "result.json").read_bytes())
+    if panel:
+        expected = {"tron":512, "boomerang":720}[episode]
+        if detail["source_sha256"]!=options.expected_sha or not detail["complete"] or detail["games"]!=expected or detail["budget"]["budget_kind"]!="cpu":
+            raise SystemExit("Incomplete head-to-head panel")
+        rows = {p["name"]:p["tally"] for p in detail["opponents"] if p["name"] in focus}
+        panel_doc = {"episode":episode, "kind":"direct-panel", "source_sha256":options.expected_sha,
+                     "seed":detail["seed"], "games":expected, "stats":detail["stats"], "opponents":rows}
+        (destination/"comparison.json").write_text(json.dumps(panel_doc,indent=2)+"\n",encoding="utf-8")
+        print(json.dumps(panel_doc))
+        sys.exit(0)
     score = detail["rating"]
 if not detail["complete"] or detail["full"] != full or detail["source_sha256"] != options.expected_sha:
     raise SystemExit("Incomplete result or source identity mismatch")
