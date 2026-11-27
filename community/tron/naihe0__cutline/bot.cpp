@@ -611,114 +611,217 @@ struct Crowd {
 };
 
 struct PathPlanner {
-    Board& b;
-    const int start;
+    Board& board;
+    const int start, bound;
     std::uint32_t rng;
     std::vector<int> path, best;
-    short index[cells];
-    int bound = 0;
+    short index[cells], queue[cells];
+    unsigned short visited[cells]{}, stamp=0;
+    int nodes=0;
 
-    PathPlanner(Board& board, const std::vector<int>& previous, int upper)
-        : b(board), start(b.heads[b.me]), rng(0x7a8541b3u + 1031u * start + 29023u * b.turn), bound(upper) {
-        auto it = std::find(previous.begin(), previous.end(), start);
-        if (it != previous.end()) {
-            best.push_back(start);
-            for (++it; it != previous.end() && b.open[*it]; ++it) best.push_back(*it);
-        } else best.push_back(start);
-        path.reserve(b.size);
-        best.reserve(b.size);
+    PathPlanner(Board& b,const std::vector<int>& previous,int upper)
+        : board(b),start(b.heads[b.me]),bound(upper),rng(0xc2b2ae35u+239u*start+17351u*b.turn) {
+        auto found=std::find(previous.begin(),previous.end(),start);
+        best.push_back(start);
+        if(found!=previous.end()) {
+            for(++found;found!=previous.end() && board.open[*found];++found) best.push_back(*found);
+        }
+        best.reserve(board.size);path.reserve(board.size);
     }
 
     unsigned random() {
-        rng ^= rng << 13;
-        rng ^= rng >> 17;
-        rng ^= rng << 5;
-        return rng;
+        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;return rng;
     }
 
-    void reset(bool reuse) {
-        std::fill_n(index, b.size, short(-1));
-        path.assign(1, start);
-        if (reuse && best.size() > 5) {
-            int keep = 1 + random() % best.size();
-            path.assign(best.begin(), best.begin() + keep);
+    bool unused(int p) const { return board.open[p] && index[p]<0; }
+    int exits(int p) const {
+        int count=0;
+        for(int offset:board.step) count+=unused(p+offset);
+        return count;
+    }
+    void record() { if(path.size()>best.size()) best=path; }
+
+    void reset(int attempt) {
+        int keep=1;
+        int length=int(best.size());
+        if(length>1 && attempt%5!=3) {
+            if(attempt%5==0) keep=length;
+            else if(attempt%5==1) keep=1+random()%length;
+            else keep=std::max(1,length-int(random()%std::max(3,length/4))-1);
         }
-        for (int i = 0; i < int(path.size()); ++i) index[path[i]] = short(i);
+        path.assign(best.begin(),best.begin()+keep);
+        std::fill_n(index,board.size,short(-1));
+        for(int i=0;i<keep;++i) index[path[i]]=short(i);
     }
 
-    bool unused(int p) const { return b.open[p] && index[p] < 0; }
+    int component(int first,int colors[]) {
+        int front=0,tail=1;
+        queue[0]=short(first);visited[first]=stamp;
+        while(front<tail) {
+            int p=queue[front++];++colors[p&1];
+            for(int offset:board.step) {
+                int q=p+offset;
+                if(unused(q) && visited[q]!=stamp) {
+                    visited[q]=stamp;queue[tail++]=short(q);
+                }
+            }
+        }
+        return tail;
+    }
+
+    void fresh() {
+        if(++stamp==0) {
+            std::fill_n(visited,board.size,0);++stamp;
+        }
+    }
+
+    // When a trail seals a neck, the next step commits it to one of the components.
+    int choices(int p,int dirs[],int sizes[]) {
+        int count=0, mask=0;
+        for(int d=0;d<4;++d) if(unused(p+board.step[d])) {
+            dirs[count++]=d;mask|=1<<d;
+        }
+        std::fill_n(sizes,4,0);
+        if(count<=1) return count;
+        int unions=0;
+        for(int d=0;d<4;++d) {
+            int n=(d+1)&3;
+            if((mask&(1<<d)) && (mask&(1<<n)) && unused(p+board.step[d]+board.step[n])) ++unions;
+        }
+        if(unions>=count-1) return count;
+        bool assigned[4]{};
+        for(int i=0;i<count;++i) {
+            if(assigned[i]) continue;
+            fresh();int colors[2]{};
+            int size=component(p+board.step[dirs[i]],colors);
+            for(int j=i;j<count;++j) if(visited[p+board.step[dirs[j]]]==stamp) {
+                assigned[j]=true;
+                sizes[dirs[j]]=std::min(size,2*std::min(colors[0],colors[1])+1);
+            }
+        }
+        return count;
+    }
 
     bool extend() {
-        int choice = 0, maxScore = -100000;
-        for (int d : b.step) {
-            const int q = path.back() + d;
-            if (!unused(q)) continue;
-            int degree = 0, exits = 0;
-            for (int off : b.step) {
-                if (unused(q + off)) ++degree;
-                else if (index[q+off] >= 0) ++exits;
-            }
-            // Low-degree cells along the boundary are easier to strand on a later pass.
-            int score = (degree ? -degree * 13 : -70 + exits * 3) + int(random() % 20);
-            if (score > maxScore) maxScore = score, choice = q;
+        int dirs[4],sizes[4],p=path.back();
+        int n=choices(p,dirs,sizes);
+        if(n==0) return false;
+        int picked=dirs[0], top=-10000;
+        if(n>1) for(int i=0;i<n;++i) {
+            int d=dirs[i],q=p+board.step[d],degree=exits(q);
+            int score=64*sizes[d]-(degree?degree*16:70)+int(random()%26);
+            if(score>top) {picked=d;top=score;}
         }
-        if (!choice) return false;
-        index[choice] = short(path.size());
-        path.push_back(choice);
-        return true;
+        int q=p+board.step[picked];
+        index[q]=short(path.size());path.push_back(q);return true;
+    }
+
+    void reverse(int from,int to) {
+        std::reverse(path.begin()+from,path.begin()+to+1);
+        for(int i=from;i<=to;++i) index[path[i]]=short(i);
     }
 
     bool rotateEnd() {
-        int pivot = -1, high = -1, last = int(path.size())-1;
-        for (int off : b.step) {
-            int pos = index[path.back() + off];
-            if (pos < 0 || pos >= last - 1) continue;
-            int q = path[pos + 1], free = 0;
-            for (int d : b.step) free += unused(q + d);
-            int merit = int(random() % 10) + (free ? 30 : 0);
-            if (merit > high) high = merit, pivot = pos;
+        int last=int(path.size())-1, pivot=-1, value=-1;
+        for(int offset:board.step) {
+            int i=index[path.back()+offset];
+            if(i<0 || i>=last-1) continue;
+            int score=(exits(path[i+1])?20:0)+int(random()%11);
+            if(score>value) {pivot=i;value=score;}
         }
-        if (pivot < 0) return false;
-        std::reverse(path.begin()+pivot+1, path.end());
-        for (int i = pivot+1; i <= last; ++i) index[path[i]] = short(i);
-        return true;
+        if(pivot<0) return false;
+        reverse(pivot+1,last);return true;
     }
 
-    bool insertPair() {
-        for (int i = 1; i < int(path.size()); ++i) {
-            int a = path[i-1], c = path[i];
-            int dir = std::abs(a-c) == 1 ? b.step[2] : 1;
-            for (int off : {dir, -dir}) {
-                if (!unused(a+off) || !unused(c+off)) continue;
-                path.insert(path.begin()+i, {a+off,c+off});
-                for (int j = i; j < int(path.size()); ++j) index[path[j]] = short(j);
+    bool growSideways() {
+        int n=int(path.size());
+        if(n<2) return false;
+        for(int j=0, i=1+random()%(n-1);j<n-1;++j) {
+            if(i==n) i=1;
+            int a=path[i-1],c=path[i];
+            int side=std::abs(a-c)==1?board.step[2]:1;
+            for(int offset:{side,-side}) if(unused(a+offset) && unused(c+offset)) {
+                path.insert(path.begin()+i,{a+offset,c+offset});
+                for(int k=i;k<int(path.size());++k) index[path[k]]=short(k);
                 return true;
             }
+            ++i;
         }
         return false;
     }
 
-    int move(std::vector<int>& previous) {
-        for (int attempt = 0; attempt < 45 && int(best.size()) <= bound; ++attempt) {
-            if (attempt && tron::budget_left() < 12) break;
-            reset(attempt % 4 != 0);
-            int stale = 0, steps = 0;
-            while (stale < 35 && steps++ < 1300) {
-                if ((steps & 63) == 0 && tron::budget_left() < 12) break;
-                while (extend()) {}
-                if (path.size() > best.size()) {
-                    best = path;
-                    if (int(best.size()) > bound) break;
+    // An internal plaquette can either move a corner or reverse a strip of the path.
+    // Both operations keep the endpoints and the number of visited cells.
+    bool rearrange() {
+        int n=int(path.size());
+        if(n<4) return false;
+        for(int k=0;k<12;++k) {
+            int i=1+random()%(n-2);
+            int a=path[i-1],p=path[i],c=path[i+1];
+            if(std::abs(a-p)!=std::abs(c-p)) {
+                int q=a+c-p;
+                if(unused(q)) {
+                    index[p]=-1;index[q]=short(i);path[i]=q;
+                    return true;
                 }
-                if (stale % 5 == 0 && insertPair()) { stale = 0; continue; }
-                if (!rotateEnd()) break;
+            }
+            int off=std::abs(c-p)==1?board.step[2]:1;
+            if(random()&1) off=-off;
+            int j=index[p+off];
+            if(j>i+1 && j+1<n && path[j+1]==c+off) {reverse(i+1,j);return true;}
+            if(j>=0 && j<i-1 && path[j+1]==c+off) {reverse(j+1,i);return true;}
+        }
+        return false;
+    }
+
+    void exact() {
+        record();
+        if(int(best.size())>bound || ++nodes>22000) return;
+        if((nodes&255)==0 && tron::budget_left()<14) {nodes=22001;return;}
+        int p=path.back(),dirs[4],sizes[4],n=choices(p,dirs,sizes);
+        if(n>=2 && (path.size()&1)==0) {
+            fresh();int colors[2]{},count=0;
+            for(int i=0;i<n;++i) {
+                int q=p+board.step[dirs[i]];
+                if(visited[q]!=stamp) count+=component(q,colors);
+            }
+            int upper=std::min(count,2*std::min(colors[0],colors[1])+1);
+            if(int(path.size())+upper<=int(best.size())) return;
+        }
+        for(int i=0;i<n;++i) {
+            int q=p+board.step[dirs[i]];
+            if(sizes[dirs[i]] && int(path.size())+sizes[dirs[i]]<=int(best.size())) continue;
+            index[q]=short(path.size());path.push_back(q);exact();path.pop_back();index[q]=-1;
+            if(nodes>22000 || int(best.size())>bound) return;
+        }
+    }
+
+    int move(std::vector<int>& previous) {
+        for(int attempt=0;attempt<80 && int(best.size())<=bound;++attempt) {
+            if(attempt && tron::budget_left()<19) break;
+            reset(attempt);
+            int stale=0,lastLength=int(path.size());
+            for(int iter=0;iter<400 && stale<42;++iter) {
+                if((iter&15)==0 && tron::budget_left()<17) break;
+                while(extend()) {}
+                record();
+                if(int(best.size())>bound) break;
+                if(int(path.size())!=lastLength) {stale=0;lastLength=int(path.size());}
+                if(stale%6==0 && growSideways()) continue;
+                bool moved=(stale%3!=2 && rotateEnd());
+                if(!moved) moved=rearrange();
                 ++stale;
+                if(!moved && stale>=8) break;
             }
         }
-        previous = best;
-        if (best.size() >= 2)
-            for (int d = 0; d < 4; ++d) if (start + b.step[d] == best[1]) return d;
-        for (int d = 0; d < 4; ++d) if (b.open[start+b.step[d]]) return d;
+        if(bound<=53 && int(best.size())<=bound && tron::budget_left()>16) {
+            reset(3);
+            exact();
+        }
+        previous=best;
+        if(best.size()>=2)
+            for(int d=0;d<4;++d) if(start+board.step[d]==best[1]) return d;
+        for(int d=0;d<4;++d) if(board.open[start+board.step[d]]) return d;
         return 0;
     }
 };
