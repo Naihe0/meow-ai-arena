@@ -28,7 +28,7 @@ jobs:
           & $compiler --version
       - name: Evaluate the verified source
         shell: pwsh
-        run: python .github/scripts/finals_candidate.py boomerang ${{ matrix.kind }} 7c9a852478a00485cd4406cc07c04235b29a0f810e06e918aee5712718e2560d
+        run: python .github/scripts/finals_candidate.py boomerang ${{ matrix.kind }} 54b57550ac06e4eddd77273f62751cb0f808dedff3e8ddea741852082708f492
       - name: Save match results
         if: always()
         uses: actions/upload-artifact@v4
