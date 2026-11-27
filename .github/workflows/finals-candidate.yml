@@ -1,0 +1,44 @@
+name: Finals candidate verification
+on:
+  push:
+    branches: ['codex/boomerang-finals-check-20261127']
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: windows-2025
+    timeout-minutes: 85
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [official-full, independent-full]
+    name: "boomerang / ${{ matrix.kind }}"
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Locate the native toolchain
+        shell: pwsh
+        run: |
+          $compiler = (Get-Command g++.exe -ErrorAction Stop).Source
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $compiler --version
+      - name: Evaluate the verified source
+        shell: pwsh
+        run: python .github/scripts/finals_candidate.py boomerang ${{ matrix.kind }} 814be792e6342a52948fc224acc0bd756d526b092f3450908fcca4b2cd88cf04
+      - name: Save match results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boomerang-${{ matrix.kind }}
+          path: |
+            validation-output/result.json
+            validation-output/comparison.json
+            validation-output/summary.md
+            validation-output/report.md
+            validation-output/official-report.md
+          retention-days: 14
+          if-no-files-found: warn
