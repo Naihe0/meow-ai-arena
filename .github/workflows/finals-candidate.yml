@@ -1,0 +1,45 @@
+name: Finals candidate verification
+on:
+  push:
+    branches: ['codex/tron-opponent-panel-20261127']
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: windows-2025
+    timeout-minutes: 85
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [direct-panel]
+    name: "tron / ${{ matrix.kind }}"
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Locate the native toolchain
+        shell: pwsh
+        run: |
+          $compiler = (Get-Command g++.exe -ErrorAction Stop).Source
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $compiler --version
+      - name: Evaluate the verified source
+        shell: pwsh
+        run: python .github/scripts/finals_candidate.py tron ${{ matrix.kind }} 2df8f0bf18d5cfa64cfc511e562c9bfd77cfff847bca5b347ea273fec55e0aa3
+      - name: Save match results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tron-${{ matrix.kind }}
+          path: |
+            validation-output/result.json
+            validation-output/comparison.json
+            validation-output/matchups.json
+            validation-output/summary.md
+            validation-output/report.md
+            validation-output/official-report.md
+          retention-days: 14
+          if-no-files-found: warn
