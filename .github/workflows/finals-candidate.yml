@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [official-full, independent-full]
+        kind: [official-quick, official-full, independent-full]
     name: "boomerang / ${{ matrix.kind }}"
     env:
       PYTHONUTF8: "1"
@@ -28,7 +28,7 @@ jobs:
           & $compiler --version
       - name: Evaluate the verified source
         shell: pwsh
-        run: python .github/scripts/finals_candidate.py boomerang ${{ matrix.kind }} 814be792e6342a52948fc224acc0bd756d526b092f3450908fcca4b2cd88cf04
+        run: python .github/scripts/finals_candidate.py boomerang ${{ matrix.kind }} 7c9a852478a00485cd4406cc07c04235b29a0f810e06e918aee5712718e2560d
       - name: Save match results
         if: always()
         uses: actions/upload-artifact@v4
@@ -37,6 +37,7 @@ jobs:
           path: |
             validation-output/result.json
             validation-output/comparison.json
+            validation-output/matchups.json
             validation-output/summary.md
             validation-output/report.md
             validation-output/official-report.md
